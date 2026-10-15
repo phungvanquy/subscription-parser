@@ -133,6 +133,12 @@ check time and the feeds containing each node. Failed, pending, expired,
 unsupported and checker-error states remain visible. Failed nodes stay in the
 provider cache and are tested again; they are not deleted.
 
+Server totals count unique proxy entries from enabled providers; published totals
+count the subset included in at least one client feed. Internal routing helpers
+such as Xray [Loopback](https://xtls.github.io/en/config/outbounds/loopback.html)
+are excluded from the inventory and totals, while remaining available as outbound
+dependencies. Pausing a provider rebuilds the inventory from the remaining sources.
+
 - Mihomo includes only nodes that recently passed through Mihomo.
 - Xray includes only nodes that recently passed through Xray, preserving required
   outbound dependencies.

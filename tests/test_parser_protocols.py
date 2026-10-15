@@ -116,6 +116,32 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(root["streamSettings"]["sockopt"]["dialerProxy"], dependency["tag"])
         self.assertEqual(dependency["settings"], fragment["settings"])
 
+    def test_loopback_helpers_are_not_servers_but_remain_in_dependency_context(self):
+        node = p.native_to_xray(native())
+        helpers = [{'tag': f'helper-{index}', 'protocol': 'loopback',
+                    'settings': {'inboundTag': f'route-{index}'}} for index in range(6)]
+        document = {'outbounds': [node, *helpers]}
+        records = p.parse(json.dumps([document, document]).encode(), 'provider')
+        combined = p.combine(records)
+        self.assertEqual(combined['total'], 1)
+        self.assertEqual(combined['duplicates_removed'], 1)
+        self.assertEqual(combined['counts'], {'hiddify': 1, 'mihomo': 1, 'xray': 1})
+        self.assertEqual([item['protocol'] for item in combined['inventory']], ['vless'])
+        self.assertEqual(records[0].context, document['outbounds'])
+        self.assertFalse(combined['diagnostics'])
+        node['streamSettings']['sockopt'] = {'dialerProxy': 'helper-0'}
+        chained = p.parse(json.dumps(document).encode(), 'provider')
+        bundle = p.bundle(chained[0], 'xray', 'selectable')
+        self.assertEqual(len(chained), 1)
+        self.assertEqual(bundle[1]['protocol'], 'loopback')
+        self.assertEqual(bundle[1]['settings'], helpers[0]['settings'])
+        self.assertEqual(bundle[0]['streamSettings']['sockopt']['dialerProxy'], bundle[1]['tag'])
+
+    def test_routing_only_subscription_is_not_a_usable_server_list(self):
+        document = {'outbounds': [{'tag': 'helper', 'protocol': 'loopback', 'settings': {'inboundTag': 'route'}}]}
+        with self.assertRaisesRegex(p.Error, 'no usable proxy configurations'):
+            p.parse(json.dumps(document).encode(), 'provider')
+
     def test_distinct_dependency_settings_not_deduplicated(self):
         node = p.native_to_xray(native())
         node["tag"] = "proxy"

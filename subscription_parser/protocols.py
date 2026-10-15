@@ -18,7 +18,9 @@ from . import common, hysteria
 from .xray_transports import hiddify_outbound
 
 Error = common.SubscriptionError
-SKIP = {"direct", "block", "dns", "selector", "urltest", "freedom", "blackhole", "reject", "pass"}
+# Routing helpers are not remote servers. Keep them in each entry's context so
+# dependency bundling can still find them, but do not create inventory rows.
+SKIP = {"direct", "block", "dns", "selector", "urltest", "freedom", "blackhole", "loopback", "reject", "pass"}
 COMMON = {"vless", "vmess", "shadowsocks", "trojan", "hysteria", "hysteria2", "tuic", "socks", "http"}
 TARGETS = ("hiddify", "mihomo", "xray")
 

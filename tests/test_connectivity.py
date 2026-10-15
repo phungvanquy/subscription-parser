@@ -136,6 +136,21 @@ class ConnectivityWebTests(unittest.TestCase):
                 self.assertEqual(len(response.json()['servers']), 1)
                 self.assertEqual(len(response.json()['excluded_servers']), 1)
 
+    def test_routing_helpers_do_not_inflate_provider_inventory_or_log_counts(self):
+        document = [{'outbounds': [entry.original for entry in entries()]},
+                    {'outbounds': [{'tag': f'helper-{index}', 'protocol': 'loopback',
+                                    'settings': {'inboundTag': f'route-{index}'}} for index in range(6)]}]
+        self.manager.fetcher = lambda *args: (json.dumps(document).encode(), {'fetched_at': common.now()})
+        state = self.refresh()
+        self.assertEqual((state['total'], state['published_total']), (2, 1))
+        self.assertEqual(state['providers'][0]['count'], 2)
+        self.assertEqual(len(state['inventory']), 2)
+        self.assertTrue(all(node['protocol'] != 'loopback' for node in state['inventory']))
+        summary = next(row['context'] for row in self.manager.logs.recent()['entries'] if row['event'] == 'run_completed')
+        self.assertEqual((summary['servers'], summary['published']), (2, 1))
+        archive = self.client.get(state['links']['combined.json']).json()
+        self.assertEqual((len(archive['servers']), len(archive['excluded_servers'])), (1, 1))
+
     def test_manual_recheck_recovers_failed_node_without_fetch_or_new_hwid(self):
         state = self.refresh(); before = list(self.calls)
         self.mode = 'all'

@@ -28,11 +28,13 @@ def main():
         failed_nodes = set()
         def fetch(url, hwid, user_agent, timeout):
             seen.append(hwid)
-            return json.dumps({'outbounds': [
+            return json.dumps([{'outbounds': [
                 {'type': 'vless', 'tag': 'Berlin', 'server': 'example.org', 'server_port': 443,
                  'uuid': '01234567-89ab-4cde-8fab-0123456789ab'},
                 {'type': 'shadowsocks', 'tag': 'Tokyo', 'server': 'example.net', 'server_port': 443,
-                 'method': 'aes-128-gcm', 'password': 'synthetic-password'}]}).encode(), {'fetched_at': common.now()}
+                 'method': 'aes-128-gcm', 'password': 'synthetic-password'}]},
+                {'outbounds': [{'protocol': 'loopback', 'tag': 'routing-helper',
+                                'settings': {'inboundTag': 'route-again'}}]}]).encode(), {'fetched_at': common.now()}
         admin = 'synthetic-browser-admin-key'
         with patch.dict(os.environ, {'PARSER_ADMIN_TOKEN': admin}):
             def checker(entries, root, **kwargs):
@@ -107,6 +109,9 @@ def main():
                 page.locator('#check-servers').click()
                 expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
                 expect(page.locator('#server-rows')).to_contain_text('Passed')
+                expect(page.locator('#server-total')).to_have_text('2')
+                expect(page.locator('#protocol-filter')).not_to_contain_text('LOOPBACK')
+                expect(page.locator('#connection-summary')).to_contain_text('0 excluded')
                 assert len(seen)==2
                 checks.append('cached connection checks publish passing nodes without another provider fetch')
                 page.locator('[data-page=overview]').click()
@@ -186,6 +191,7 @@ def main():
                 expect(page.locator('#server-rows tr')).to_have_count(1)
                 expect(page.locator('#server-rows')).to_contain_text('Tokyo')
                 expect(page.locator('#server-rows')).to_contain_text('Failed')
+                expect(page.locator('#connection-summary')).to_contain_text('1 excluded')
                 page.locator('#connection-filter').select_option('')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/servers-desktop.png',full_page=True)
