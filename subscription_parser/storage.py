@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from . import common
 from .config import admin_key
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 CREDENTIALS_SCHEMA = """CREATE TABLE credentials (
     name TEXT PRIMARY KEY CHECK(name = 'subscription_token'),
     value TEXT NOT NULL CHECK(length(value) > 0)
@@ -28,16 +28,27 @@ PROVIDERS_SCHEMA = """CREATE TABLE providers (
     enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
     position INTEGER NOT NULL
 );"""
+SUBSCRIPTIONS_SCHEMA = """CREATE TABLE subscriptions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+    token TEXT NOT NULL UNIQUE CHECK(length(token) > 0),
+    all_providers INTEGER NOT NULL CHECK(all_providers IN (0, 1))
+);"""
+MEMBERSHIPS_SCHEMA = """CREATE TABLE subscription_providers (
+    subscription_id TEXT NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+    provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    PRIMARY KEY (subscription_id, provider_id)
+);"""
 SCHEMA = """
 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + CREDENTIALS_SCHEMA + """
+""" + SUBSCRIPTIONS_SCHEMA + """
 CREATE TABLE hwids (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL COLLATE NOCASE UNIQUE,
     value TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0)
 );
-""" + PROVIDERS_SCHEMA + """
+""" + PROVIDERS_SCHEMA + MEMBERSHIPS_SCHEMA + """
 CREATE TABLE settings (
     id INTEGER PRIMARY KEY CHECK(id = 1),
     refresh_seconds INTEGER NOT NULL CHECK(refresh_seconds BETWEEN 300 AND 86400),
@@ -93,11 +104,12 @@ class Store:
                 self._migrate_devices()
             if version in {1, 2, 3}:
                 self._migrate_connectivity()
+            if version in {1, 2, 3, 4}:
+                self._migrate_subscriptions()
             with self.connection() as connection:
                 if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
                     raise common.SubscriptionError('unsupported application database version')
-                keys = {row[0] for row in connection.execute('SELECT name FROM credentials')}
-                if keys != {'subscription_token'}:
+                if not connection.execute("SELECT 1 FROM subscriptions WHERE id = 'default'").fetchone():
                     raise common.SubscriptionError('application credentials are missing; restore a backup')
                 if connection.execute('SELECT count(*) FROM settings').fetchone()[0] != 1:
                     raise common.SubscriptionError('application settings are missing; restore a backup')
@@ -141,6 +153,21 @@ class Store:
                 connection.execute('ALTER TABLE settings ADD COLUMN check_seconds INTEGER NOT NULL '
                                    'DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)')
                 connection.execute('PRAGMA user_version = 4')
+
+    def _migrate_subscriptions(self):
+        with common.process_lock(self.directory / 'app.lock'):
+            with self.connection(write=True) as connection:
+                if connection.execute('PRAGMA user_version').fetchone()[0] != 4:
+                    return
+                keys = dict(connection.execute('SELECT name, value FROM credentials'))
+                if set(keys) != {'subscription_token'} or not keys['subscription_token']:
+                    raise common.SubscriptionError('application credentials are missing; restore a backup')
+                connection.execute(SUBSCRIPTIONS_SCHEMA)
+                connection.execute(MEMBERSHIPS_SCHEMA)
+                connection.execute('INSERT INTO subscriptions VALUES (?, ?, ?, 1)',
+                                   ('default', 'All providers', keys['subscription_token']))
+                connection.execute('DROP TABLE credentials')
+                connection.execute('PRAGMA user_version = 5')
 
     def _legacy_inputs(self):
         env_path = self.root / '.env'
@@ -199,8 +226,8 @@ class Store:
                     identifier = secrets.token_hex(8)
                     identities[name] = identifier
                     connection.execute('INSERT INTO hwids (id, name, value) VALUES (?, ?, ?)', (identifier, name, value))
-                connection.execute('INSERT INTO credentials VALUES (?, ?)',
-                                   ('subscription_token', env.get('PARSER_SUBSCRIPTION_TOKEN') or secrets.token_urlsafe(32)))
+                connection.execute('INSERT INTO subscriptions VALUES (?, ?, ?, 1)',
+                                   ('default', 'All providers', env.get('PARSER_SUBSCRIPTION_TOKEN') or secrets.token_urlsafe(32)))
                 connection.execute('INSERT INTO settings (id, refresh_seconds) VALUES (1, ?)', (config['refresh_seconds'],))
                 for position, provider in enumerate(config['providers']):
                     connection.execute(PROVIDER_INSERT, (provider['id'], provider['name'], provider['url'],
@@ -258,15 +285,72 @@ class Store:
         if name != 'subscription_token':
             raise ValueError('unknown application credential')
         with self.connection() as connection:
-            row = connection.execute('SELECT value FROM credentials WHERE name = ?', (name,)).fetchone()
-        if not row or not row['value']:
+            row = connection.execute("SELECT token FROM subscriptions WHERE id = 'default'").fetchone()
+        if not row or not row['token']:
             raise common.SubscriptionError('application credential is missing; restore a backup')
-        return row['value']
+        return row['token']
 
-    def rotate_subscription_token(self):
+    def rotate_subscription_token(self, identifier='default'):
         with self.connection(write=True) as connection:
-            connection.execute("UPDATE credentials SET value = ? WHERE name = 'subscription_token'",
-                               (secrets.token_urlsafe(32),))
+            if not connection.execute('UPDATE subscriptions SET token = ? WHERE id = ?',
+                                      (secrets.token_urlsafe(32), identifier)).rowcount:
+                raise common.SubscriptionError('subscription does not exist')
+
+    @staticmethod
+    def _subscription(connection, row):
+        return dict(row) | {'all_providers': bool(row['all_providers']), 'provider_ids': [p[0] for p in
+            connection.execute('SELECT provider_id FROM subscription_providers WHERE subscription_id = ? ORDER BY provider_id',
+                               (row['id'],))]}
+
+    def subscriptions(self):
+        with self.connection() as connection:
+            return [self._subscription(connection, row) for row in connection.execute(
+                "SELECT * FROM subscriptions ORDER BY id != 'default', name COLLATE NOCASE")]
+
+    def subscription_for_token(self, token):
+        if not token or len(token) > 256:
+            return None
+        with self.connection() as connection:
+            row = connection.execute('SELECT * FROM subscriptions WHERE token = ?', (token,)).fetchone()
+            return self._subscription(connection, row) if row else None
+
+    def save_subscription(self, values, identifier=None):
+        name = values['name'].strip()
+        if not name or len(name) > 80 or any(ord(char) < 32 for char in name):
+            raise common.SubscriptionError('subscription name must contain 1–80 characters without control characters')
+        selected = values.get('provider_ids', [])
+        all_providers = values.get('all_providers', False)
+        if len(selected) != len(set(selected)):
+            raise common.SubscriptionError('choose each provider only once')
+        if (all_providers and selected) or (not all_providers and not selected):
+            raise common.SubscriptionError('choose one or more providers, or all enabled providers')
+        with self.connection(write=True) as connection:
+            if identifier and not connection.execute('SELECT 1 FROM subscriptions WHERE id = ?', (identifier,)).fetchone():
+                raise common.SubscriptionError('subscription does not exist')
+            if any(row['name'].casefold() == name.casefold() for row in connection.execute(
+                    'SELECT name FROM subscriptions WHERE id != ?', (identifier or '',))):
+                raise common.SubscriptionError('subscription name must be unique')
+            known = {row[0] for row in connection.execute('SELECT id FROM providers')}
+            if not set(selected) <= known:
+                raise common.SubscriptionError('a selected provider no longer exists; review the selection')
+            if identifier:
+                connection.execute('UPDATE subscriptions SET name = ?, all_providers = ? WHERE id = ?',
+                                   (name, int(all_providers), identifier))
+                connection.execute('DELETE FROM subscription_providers WHERE subscription_id = ?', (identifier,))
+            else:
+                identifier = secrets.token_hex(8)
+                connection.execute('INSERT INTO subscriptions VALUES (?, ?, ?, ?)',
+                                   (identifier, name, secrets.token_urlsafe(32), int(all_providers)))
+            connection.executemany('INSERT INTO subscription_providers VALUES (?, ?)',
+                                   [(identifier, provider) for provider in selected])
+        return identifier
+
+    def delete_subscription(self, identifier):
+        if identifier == 'default':
+            raise common.SubscriptionError('the original subscription cannot be deleted; edit its providers or rotate its links')
+        with self.connection(write=True) as connection:
+            if not connection.execute('DELETE FROM subscriptions WHERE id = ?', (identifier,)).rowcount:
+                raise common.SubscriptionError('subscription does not exist')
 
     def hwids(self):
         with self.connection() as connection:
@@ -357,9 +441,16 @@ class Store:
                 connection.execute('UPDATE settings SET refresh_seconds = ? WHERE id = 1', (config['refresh_seconds'],))
                 if 'check_seconds' in config:
                     connection.execute('UPDATE settings SET check_seconds = ? WHERE id = 1', (config['check_seconds'],))
-                connection.execute('DELETE FROM providers')
+                # Retain rows for existing providers: deleting/reinserting them
+                # would cascade-delete every subscription's provider selection.
+                keep = {provider['id'] for provider in config['providers']}
+                for row in connection.execute('SELECT id FROM providers').fetchall():
+                    if row['id'] not in keep:
+                        connection.execute('DELETE FROM providers WHERE id = ?', (row['id'],))
                 for position, provider in enumerate(config['providers']):
-                    connection.execute(PROVIDER_INSERT, (provider['id'], provider['name'], provider['url'],
+                    connection.execute(PROVIDER_INSERT + ' ON CONFLICT(id) DO UPDATE SET name=excluded.name, '
+                        'url=excluded.url, hwid_id=excluded.hwid_id, user_agent=excluded.user_agent, '
+                        'enabled=excluded.enabled, position=excluded.position', (provider['id'], provider['name'], provider['url'],
                         provider['hwid_id'], provider['user_agent'], int(provider['enabled']), position))
         except sqlite3.IntegrityError:
             raise common.SubscriptionError('provider settings conflict or reference a missing HWID') from None

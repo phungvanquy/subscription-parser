@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from subscription_parser import common
 from subscription_parser.app import create_app
-from subscription_parser.storage import Store
+from subscription_parser.storage import Store, SCHEMA_VERSION, CREDENTIALS_SCHEMA
 
 
 class StorageTests(unittest.TestCase):
@@ -43,7 +43,7 @@ class StorageTests(unittest.TestCase):
         with patch.dict(os.environ, {'DEVICE_ID': 'wrong-process-identity', 'PARSER_ADMIN_TOKEN': 'wrong-admin-key'}):
             store = Store(self.root)
         with store.connection() as connection:
-            self.assertEqual([row[0] for row in connection.execute('SELECT name FROM credentials')], ['subscription_token'])
+            self.assertEqual([row[0] for row in connection.execute('SELECT id FROM subscriptions')], ['default'])
         self.assertEqual(store.credential('subscription_token'), 'original-link-key')
         hwids = {item['id']: item for item in store.hwids()}
         actual = store.config()
@@ -143,12 +143,15 @@ class StorageTests(unittest.TestCase):
         self.legacy()
         store = Store(self.root)
         before = store.config()
+        store.save_subscription({'name': 'Bound subscription', 'provider_ids': [before['providers'][0]['id']]})
+        bindings = store.subscriptions()
         invalid = store.config()
         invalid['refresh_seconds'] = 1800
         invalid['providers'][0]['hwid_id'] = 'missing'
         with self.assertRaises(common.SubscriptionError):
             store.save_config(invalid)
         self.assertEqual(store.config(), before)
+        self.assertEqual(store.subscriptions(), bindings)
         with store.connection(write=True) as connection:
             with self.assertRaises(sqlite3.IntegrityError):
                 connection.execute('DELETE FROM hwids WHERE id = ?', (before['providers'][0]['hwid_id'],))
@@ -180,6 +183,7 @@ class StorageTests(unittest.TestCase):
         before = store.config()
         identities = store.hwids()
         token = store.credential('subscription_token')
+        self.downgrade_subscriptions(store)
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
             connection.execute('PRAGMA user_version = 3')
@@ -203,9 +207,54 @@ class StorageTests(unittest.TestCase):
         upgraded.save_config(changed)
         self.assertEqual(Store(self.root).config()['check_seconds'], 900)
 
+    def downgrade_subscriptions(self, store):
+        token = store.credential('subscription_token')
+        with store.connection(write=True) as connection:
+            connection.execute(CREDENTIALS_SCHEMA)
+            connection.execute('INSERT INTO credentials VALUES (?, ?)', ('subscription_token', token))
+            connection.execute('DROP TABLE subscription_providers')
+            connection.execute('DROP TABLE subscriptions')
+            connection.execute('PRAGMA user_version = 4')
+
+    def test_subscription_migration_is_atomic_and_preserves_existing_link_and_data(self):
+        self.legacy()
+        store = Store(self.root)
+        config, devices, token = store.config(), store.hwids(), store.credential('subscription_token')
+        self.downgrade_subscriptions(store)
+        connect = sqlite3.connect
+        class FailingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql == 'PRAGMA user_version = 5':
+                    raise sqlite3.OperationalError('simulated migration failure')
+                return super().execute(sql, *args)
+        with patch('subscription_parser.storage.sqlite3.connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=FailingConnection)):
+            with self.assertRaises(common.SubscriptionError):
+                Store(self.root)
+        with store.connection() as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 4)
+            self.assertEqual(connection.execute('SELECT value FROM credentials').fetchone()[0], token)
+            self.assertIsNone(connection.execute("SELECT 1 FROM sqlite_master WHERE name = 'subscriptions'").fetchone())
+        upgraded = Store(self.root)
+        self.assertEqual(upgraded.config(), config)
+        self.assertEqual(upgraded.hwids(), devices)
+        self.assertEqual(upgraded.subscriptions(), [{'id': 'default', 'name': 'All providers', 'token': token,
+                                                    'all_providers': True, 'provider_ids': []}])
+        with upgraded.connection() as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
+            self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(), [])
+
+    def test_many_subscriptions_persist_without_a_fixed_count_limit(self):
+        store = Store(self.root)
+        for number in range(101):
+            store.save_subscription({'name': f'Subscription {number}', 'all_providers': True})
+        reloaded = Store(self.root)
+        self.assertEqual(len(reloaded.subscriptions()), 102)
+        self.assertEqual(len({s['token'] for s in reloaded.subscriptions()}), 102)
+
     def version_one(self):
         self.legacy()
         store = Store(self.root)
+        self.downgrade_subscriptions(store)
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE credentials RENAME TO new_credentials')
             connection.execute("CREATE TABLE credentials (name TEXT PRIMARY KEY CHECK(name IN ('admin_token', 'subscription_token')), value TEXT NOT NULL CHECK(length(value) > 0))")
@@ -228,8 +277,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(store.credential('subscription_token'), 'original-link-key')
         with store.connection() as connection:
             self.assertEqual([tuple(row) for row in connection.execute('SELECT id, name, value FROM hwids ORDER BY id')], hwids)
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 4)
-            self.assertEqual([row[0] for row in connection.execute('SELECT name FROM credentials')], ['subscription_token'])
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
+            self.assertEqual([row[0] for row in connection.execute('SELECT id FROM subscriptions')], ['default'])
             self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         for path, data in cookie_files.items():
             self.assertEqual(Path(path).read_bytes(), data)
@@ -270,6 +319,7 @@ class StorageTests(unittest.TestCase):
         self.legacy()
         store=Store(self.root)
         original=store.config()
+        self.downgrade_subscriptions(store)
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE hwids DROP COLUMN revision')
             connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
@@ -289,6 +339,7 @@ class StorageTests(unittest.TestCase):
         self.legacy()
         store=Store(self.root)
         before=store.config()
+        self.downgrade_subscriptions(store)
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE hwids DROP COLUMN revision')
             connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')

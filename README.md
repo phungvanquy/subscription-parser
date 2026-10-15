@@ -7,7 +7,7 @@ it does not attempt to turn one proxy protocol into another.
 ## Web dashboard
 
 Run the dashboard on your own server using Docker Compose.
-HWIDs, providers, the subscription token and dashboard settings are records in
+HWIDs, providers, named subscriptions, their tokens and dashboard settings are records in
 `/data/app.sqlite3`, inside the persistent data volume. The checkout's `.env`
 contains deployment configuration and the admin login key (`PARSER_ADMIN_TOKEN`)
 and is never rewritten by the app.
@@ -19,8 +19,32 @@ and is never rewritten by the app.
    response without fetching again. Failed tests leave saved providers unchanged.
 4. Open **Server library** to see the automatic connection checks, or choose
    **Check servers** to run them immediately using saved subscriptions.
-5. Open **Subscription links** and copy the Hiddify JSON or Mihomo YAML link into
-   your client. Only recently passing nodes are included; the URLs remain stable.
+5. Open **Subscription links**. Use the existing **All providers** subscription,
+   or choose **New subscription**, name it and select one or more providers.
+6. Select your subscription and copy its Hiddify JSON, Mihomo YAML or other client
+   link. Only recently passing nodes from its enabled providers are included.
+
+You can create any number of named subscriptions; there is no fixed count limit.
+Each has independent URLs for all five output formats. **Edit providers** changes
+its name and provider selection without changing its URLs. **All enabled providers**
+also includes providers added later; a specific selection includes only those
+saved provider IDs, even after a provider is renamed. Paused providers remain
+selected but contribute no servers. Deleting a provider removes that assignment;
+a selection that becomes empty never falls back to all providers.
+
+The original subscription is migrated as **All providers**, preserving its token
+and existing client URLs. You can edit or rotate it; it cannot be deleted.
+New subscriptions can be deleted independently without deleting providers or HWIDs.
+The export cards show counts for the selected subscription. Overview, server library
+and compatibility notes describe the entire workspace; each combined archive
+contains diagnostics and inventory only for its own selection.
+
+Creating or editing subscriptions uses cached provider responses. It does not
+fetch upstream subscriptions or register devices. Downloads and connection checks
+are shared: each exact Mihomo/Xray configuration is tested once per check run,
+including distinct native variants needed by different selections. Identical
+provider selections share a generated publication; additional distinct selections
+require local conversion/validation and storage for their exports.
 
 The server stores each authorized HWID in SQLite and sends that exact value as `x-hwid` on
 each fetch. It never generates replacement IDs to retry a device-limit error.
@@ -44,8 +68,11 @@ Adding a provider never preselects a saved ID. Bulk imports provide a separate
 device selector for each link. Changing a subscription's URL, device or user
 agent in the dashboard requires another fetch test; a name-only edit does not.
 
-A persistent subscription token protects client feeds independently of the admin login.
-The **Rotate links** action replaces that token and invalidates old URLs.
+A persistent token protects each subscription independently of the admin login.
+**Rotate links** replaces only the selected subscription's token and invalidates
+its old URLs. Other subscriptions continue working. Deletion also invalidates
+that subscription's URLs. Previously downloaded client configurations cannot
+be revoked by rotating or deleting a link.
 `PARSER_PUBLIC_URL` controls the address copied into subscription links; it is
 set in the deployment `.env` and passed to the container by Compose. The database
 and private backups have restrictive permissions and are excluded from Git.
@@ -264,7 +291,7 @@ the dashboard requires testing when fetch settings change.
 | Location | Contents |
 | --- | --- |
 | Checkout `.env` | Admin key, public URL, published port, bind address, trusted proxies and image selection. |
-| Volume `/data/app.sqlite3` | HWIDs, providers, subscription token and refresh interval. |
+| Volume `/data/app.sqlite3` | HWIDs, providers, subscriptions, tokens, provider selections and schedules. |
 | Volume `/data/.parser-state/` | Provider response cache, published snapshot, refresh history and process lock. |
 | Volume `/data/legacy-backup/` | Private copies of legacy files, created only when migrating an older installation. |
 
@@ -463,6 +490,7 @@ docker run --rm --user 0 subscription-parser:dev sh -c 'python -m playwright ins
 ```
 
 The browser script exercises login, HWID labels, provider forms, filtering,
+named subscriptions, provider selections, independent link rotation and deletion,
 export links, scheduling and mobile navigation against synthetic data. It never
 changes live providers. `PARSER_TEST_BROWSER` can select an existing Chromium
 executable in the test environment.

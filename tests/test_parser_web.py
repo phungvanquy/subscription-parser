@@ -157,7 +157,7 @@ class WebTests(unittest.TestCase):
         # A running app keeps its startup configuration until it is recreated.
         self.assertEqual(self.client.get('/api/state').status_code, 200)
         with self.manager.store.connection() as connection:
-            self.assertEqual([row[0] for row in connection.execute('SELECT name FROM credentials')], ['subscription_token'])
+            self.assertEqual([row[0] for row in connection.execute('SELECT id FROM subscriptions')], ['default'])
 
     def test_fixed_hwid_fetch_outputs_and_no_secrets_in_dashboard(self):
         self.login()

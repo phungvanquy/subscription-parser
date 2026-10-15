@@ -80,6 +80,7 @@ class StateImportTests(unittest.TestCase):
         original.add_hwid('Second device', 'second-authorized-id')
         original.rotate_subscription_token()
         token = original.credential('subscription_token')
+        original.save_subscription({'name': 'Additional subscription', 'all_providers': True})
         stream = io.BytesIO()
         with tarfile.open(fileobj=stream, mode='w:gz') as archive:
             for name in ('app.sqlite3', '.parser-state', 'legacy-backup'):
@@ -88,8 +89,7 @@ class StateImportTests(unittest.TestCase):
         self.assertEqual(import_archive(stream, self.destination), 5)
         restored = Store(self.destination)
         self.assertEqual(restored.credential('subscription_token'), token)
-        with restored.connection() as connection:
-            self.assertEqual([row[0] for row in connection.execute('SELECT name FROM credentials')], ['subscription_token'])
+        self.assertEqual(restored.subscriptions(), original.subscriptions())
         self.assertEqual(restored.hwids(), original.hwids())
         self.assertEqual(restored.config(), original.config())
         self.assertEqual((self.destination/'.parser-state/cache/source.json').read_bytes(),

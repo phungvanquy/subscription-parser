@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import common
+from . import common, publication
 from .config import admin_key
 from .fetch import fetch_subscription
 from .service import Manager, Busy
@@ -60,6 +60,12 @@ class DeviceReplacement(BaseModel):
 class Settings(BaseModel):
     refresh_seconds: int | None = Field(default=None, ge=300, le=86400)
     check_seconds: int | None = Field(default=None, ge=300, le=86400)
+
+
+class Subscription(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    all_providers: bool = False
+    provider_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, checker=None):
@@ -258,17 +264,40 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
         manager.store.rotate_subscription_token()
         return {"rotated": True}
 
+    @app.get('/api/subscriptions', dependencies=[Depends(admin)])
+    def subscriptions(request: Request):
+        return manager.public_subscriptions(public_url or str(request.base_url))
+
+    @app.post('/api/subscriptions', dependencies=[Depends(admin)], status_code=201)
+    def add_subscription(body: Subscription):
+        return {'id': manager.change_subscription(body.model_dump())}
+
+    @app.put('/api/subscriptions/{identifier}', dependencies=[Depends(admin)])
+    def edit_subscription(identifier: str, body: Subscription):
+        return {'id': manager.change_subscription(body.model_dump(), identifier)}
+
+    @app.delete('/api/subscriptions/{identifier}', dependencies=[Depends(admin)])
+    def delete_subscription(identifier: str):
+        manager.change_subscription(identifier=identifier, delete=True)
+        return {'deleted': True}
+
+    @app.post('/api/subscriptions/{identifier}/rotate-link', dependencies=[Depends(admin)])
+    def rotate_subscription(identifier: str):
+        manager.store.rotate_subscription_token(identifier)
+        return {'rotated': True}
+
     @app.get("/sub/{token}/{filename}")
     def subscription(token: str, filename: str):
-        expected = manager.store.credential('subscription_token')
-        if not hmac.compare_digest(token.encode(), expected.encode()) or filename not in {"hiddify.json", "mihomo.yaml", "xray.json", "v2board.txt", "combined.json"}:
-            raise HTTPException(404, "subscription not found")
         with manager.guard:
-            if not manager.publication_current(manager.snapshot):
+            selected = manager.store.subscription_for_token(token)
+            if selected is None or filename not in publication.FILES:
+                raise HTTPException(404, "subscription not found")
+            snapshot = manager.subscription_snapshot(selected)
+            if not manager.publication_current(snapshot):
                 raise HTTPException(503, 'connection checks are pending or expired; check servers in the dashboard')
-            content = manager.snapshot.get("exports", {}).get(filename)
+            content = snapshot.get("exports", {}).get(filename)
             target = {"hiddify.json": "hiddify", "mihomo.yaml": "mihomo", "xray.json": "xray", "v2board.txt": "v2board"}.get(filename)
-            if target and not manager.snapshot.get("counts", {}).get(target):
+            if target and not snapshot.get("counts", {}).get(target):
                 raise HTTPException(503, "no recently passing servers available for this client; check the server library")
         if content is None:
             raise HTTPException(503, "subscription has not been refreshed yet")

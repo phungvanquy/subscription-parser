@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -11,9 +12,8 @@ import secrets
 import threading
 import time
 
-import yaml
 
-from . import common, connectivity, protocols, v2board
+from . import common, connectivity, protocols, publication
 from .fetch import fetch_subscription
 from .debug_log import DebugLog
 from .storage import Store
@@ -54,12 +54,22 @@ class Manager:
             for server in self.snapshot.get('inventory', []):
                 server['clients'] = []
         self._upgrade_cached_requests()
+        if self.snapshot.get('generated_at') and 'sources_key' not in self.snapshot:
+            # Bind pre-upgrade snapshots once before accepting configuration
+            # changes, including across a restart after a failed rebuild.
+            self.snapshot['sources_key'] = self.sources_key()
+            common.atomic_write(self.snapshot_path, common.json_text(self.snapshot))
 
     def request_fingerprint(self, provider):
         identifier = provider['hwid_id']
         request = [provider['url'], provider['user_agent'], identifier,
                    self.store.hwid_revision(identifier) if identifier else None]
         return hashlib.sha256(json.dumps(request).encode()).hexdigest()
+
+    def sources_key(self, config=None):
+        providers = (config or self.store.config())['providers']
+        values = [[p['id'], p['name'], self.request_fingerprint(p)] for p in providers if p['enabled']]
+        return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
     def _upgrade_cached_requests(self):
         # Old caches were keyed only by URL. Bind each to its original saved
@@ -148,20 +158,36 @@ class Manager:
             with self.guard:
                 self.busy_action = 'fetching' if download else 'checking' if check else 'updating'
             config = self.store.config()
+            sources_key = self.sources_key(config)
             enabled = [p for p in config["providers"] if p["enabled"]]
-            entries, statuses = [], {}
+            entries, statuses, by_provider = [], {}, {}
             with ThreadPoolExecutor(max_workers=4) as pool:
                 jobs = [(provider, pool.submit(self.fetch, provider, download and (selected is None or provider["id"] == selected))) for provider in enabled]
                 for provider, job in jobs:
                     found, status = job.result()
+                    by_provider[provider['id']] = found
                     entries.extend(found)
                     statuses[provider["id"]] = status
             for provider in config["providers"]:
                 if not provider["enabled"]:
                     statuses[provider["id"]] = {"id": provider["id"], "status": "disabled", "count": 0, "protocols": {}}
             stage = 'validate'
-            accepted = checked_combine(entries, self.store.root)
-            self.log_validation(accepted)
+            # Build each distinct selection once. All links share upstream
+            # downloads and exact-configuration connection-check results.
+            scopes = {'all': entries}
+            for subscription in self.store.subscriptions():
+                key = publication.scope_key(subscription)
+                if key in scopes:
+                    continue
+                selected_ids = set(subscription['provider_ids'])
+                scopes[key] = copy.deepcopy([entry for provider in enabled if provider['id'] in selected_ids
+                                            for entry in by_provider[provider['id']]])
+            # Validation can reject an identity's native variant in one scope.
+            # Keep selections independent before that mutation takes place.
+            for key, nodes in list(scopes.items()):
+                accepted = checked_combine(nodes, self.store.root)
+                self.log_validation(accepted)
+                scopes[key] = (nodes, accepted['validation'])
             results = self.snapshot.get('connectivity', {})
             if check:
                 stage = 'check'
@@ -171,53 +197,28 @@ class Manager:
                     with self.guard:
                         self.check_progress = {'done': done, 'total': total}
                 previous = results
-                results = self.checker(entries, self.store.root, stop=self.stop,
+                check_entries = [entry for nodes, _ in scopes.values() for entry in connectivity.unique_entries(nodes)]
+                results = self.checker(check_entries, self.store.root, stop=self.stop,
                                        previous=results, progress=progress)
                 self.log_checks(previous, results)
             stage = 'publish'
             max_age = config['check_seconds'] * 2
             evaluated_at = time.time()
-            filtered = connectivity.filtered_entries(entries, results, max_age, evaluated_at)
-            combined = protocols.combine(filtered)
-            combined['validation'] = accepted['validation']
-            uri_feed = v2board.export(filtered)
-            combined['counts']['v2board'] = uri_feed['count']
-            combined['diagnostics'].extend(uri_feed['diagnostics'])
-            for server in combined['inventory']:
-                if server['id'] in uri_feed['identities']:
-                    server['clients'].append('v2board')
-            unique = {entry.identity[:16]: entry for entry in connectivity.unique_entries(entries)}
-            expiries, pending = [], False
-            for server in combined['inventory']:
-                entry = unique[server['id']]
-                health = {core: connectivity.current_result(entry, core, results, max_age, evaluated_at) for core in connectivity.CORES}
-                server['connectivity'] = {core: {k: v for k, v in value.items() if k not in {'fingerprint', 'checked_ts'}}
-                                          for core, value in health.items()}
-                pending |= any(value['status'] in {'pending', 'stale'} for value in health.values())
-                expiries.extend(value['checked_ts'] + max_age for value in health.values() if value['status'] == 'passed')
-            combined['published_total'] = sum(bool(server['clients']) for server in combined['inventory'])
-            combined['connectivity_policy'] = connectivity.POLICY_VERSION
-            combined['evaluated_at'] = evaluated_at
-            combined['valid_until'] = min(expiries) if expiries else time.time() + max_age
-            combined['connectivity'] = {entry.identity: results.get(entry.identity, {}) for entry in unique.values()}
-            combined['last_check'] = common.now() if check else self.snapshot.get('last_check')
             generated = common.now()
-            exports = {"hiddify.json": common.json_text(combined["hiddify"]),
-                       "mihomo.yaml": yaml.safe_dump(combined["mihomo"], allow_unicode=True, sort_keys=False),
-                       "xray.json": common.json_text(combined["xray"]),
-                       "v2board.txt": uri_feed['body']}
-            exports["combined.json"] = common.json_text({"schema_version": 2, "generated_at": generated,
-                "servers": [server for server in combined['inventory'] if server['clients']],
-                "excluded_servers": [server for server in combined['inventory'] if not server['clients']],
-                "hiddify": combined["hiddify"], "mihomo": combined["mihomo"], "xray": combined["xray"],
-                "diagnostics": combined["diagnostics"]})
+            last_check = generated if check else self.snapshot.get('last_check')
+            publications, pending = {}, False
+            for key, (nodes, validation) in scopes.items():
+                published, waiting = publication.build(nodes, results, max_age, evaluated_at, generated, validation, last_check)
+                publications[key] = published
+                pending |= waiting
+            combined = publications.pop('all')
             event = {"at": generated, "seconds": round(time.monotonic() - started, 2), "servers": combined["total"],
                      "published": combined['published_total'],
                      "fresh": sum(s["status"] == "fresh" for s in statuses.values()),
                      "cached": sum(s["status"] == "cached" for s in statuses.values()),
                      "action": "refresh" if download else "connection check" if check else "configuration updated"}
             snapshot = {k: v for k, v in combined.items() if k not in protocols.TARGETS}
-            snapshot.update(generated_at=generated, providers=statuses, exports=exports,
+            snapshot.update(providers=statuses, publications=publications, connectivity=results, sources_key=sources_key,
                             history=([event] + self.snapshot.get("history", []))[:20])
             common.atomic_write(self.snapshot_path, common.json_text(snapshot))
             with self.guard:
@@ -264,10 +265,10 @@ class Manager:
                                            daemon=True, name='server-check')
             self.worker.start()
 
-    @staticmethod
-    def publication_current(snapshot):
+    def publication_current(self, snapshot, sources_key=None):
         return (snapshot.get('connectivity_policy') == connectivity.POLICY_VERSION
-                and snapshot.get('evaluated_at', 0) <= time.time() < snapshot.get('valid_until', 0))
+                and snapshot.get('evaluated_at', 0) <= time.time() < snapshot.get('valid_until', 0)
+                and self.snapshot.get('sources_key') == (sources_key or self.sources_key()))
 
     def change_settings(self, values):
         with self.guard:
@@ -284,6 +285,40 @@ class Manager:
             self.refresh(download=False, check=False)
             with self.guard:
                 self.next_check = time.time()
+
+    def change_subscription(self, values=None, identifier=None, delete=False):
+        with self.guard:
+            if self.busy:
+                raise Busy('wait for the current refresh or connection check before changing subscriptions')
+            if delete:
+                self.store.delete_subscription(identifier)
+            else:
+                identifier = self.store.save_subscription(values, identifier)
+            self.busy = True
+        # Selections are applied before publication. If a rebuild fails, an
+        # unmatched selection stays unavailable instead of serving other sources.
+        self.refresh(download=False, check=False)
+        return identifier
+
+    def subscription_snapshot(self, subscription):
+        key = publication.scope_key(subscription)
+        return self.snapshot if key == 'all' else self.snapshot.get('publications', {}).get(key, {})
+
+    def public_subscriptions(self, base_url):
+        with self.guard:
+            result = []
+            sources_key = self.sources_key()
+            for subscription in self.store.subscriptions():
+                snapshot = self.subscription_snapshot(subscription)
+                current = self.publication_current(snapshot, sources_key)
+                token = subscription['token']
+                result.append({k: v for k, v in subscription.items() if k != 'token'} | {
+                    'total': snapshot.get('total', 0),
+                    'published_total': snapshot.get('published_total', 0) if current else 0,
+                    'counts': snapshot.get('counts', {}) if current else {},
+                    'generated_at': snapshot.get('generated_at'), 'ready': current,
+                    'links': {name: f"{base_url.rstrip('/')}/sub/{token}/{name}" for name in publication.FILES}})
+            return result
 
     def change_provider(self, values=None, provider_id=None, delete=False):
         with self.guard:
@@ -414,9 +449,9 @@ class Manager:
         with self.guard:
             snapshot = self.snapshot
             config = self.store.config()
-            token = self.store.credential('subscription_token')
+            subscriptions = self.public_subscriptions(base_url)
             providers = [self.store.public_provider(p) | snapshot.get("providers", {}).get(p["id"], {"status": "pending", "count": 0, "protocols": {}}) for p in config["providers"]]
-            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity"}}
+            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications", "sources_key"}}
             if not self.publication_current(snapshot):
                 public['counts'] = {target: 0 for target in (*protocols.TARGETS, 'v2board')}
                 public['published_total'] = 0
@@ -430,4 +465,5 @@ class Manager:
                 "refresh_seconds": config["refresh_seconds"], "next_refresh": self.next_refresh,
                 "check_seconds": config['check_seconds'], "next_check": self.next_check,
                 "busy_action": self.busy_action, "check_progress": self.check_progress,
-                "links": {name: f"{base_url.rstrip('/')}/sub/{token}/{name}" for name in ("hiddify.json", "mihomo.yaml", "xray.json", "v2board.txt", "combined.json")}}
+                "subscriptions": subscriptions,
+                "links": next(s['links'] for s in subscriptions if s['id'] == 'default')}

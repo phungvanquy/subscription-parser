@@ -107,12 +107,21 @@ def main():
         state = api('/api/state')
         new = state['links']['v2board.txt']
         assert new != old
+        scoped_id = api('/api/subscriptions', 'POST', {'name': 'Docker scoped', 'provider_ids': ['synthetic']})['id']
+        scoped = next(item for item in api('/api/subscriptions') if item['id'] == scoped_id)
+        assert scoped['counts']['v2board'] == 1 and scoped['links'] != state['links']
+        scoped_link = scoped['links']['v2board.txt']
         log_entry = api('/api/logs')['entries'][0]
         compose('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '60')
         state = wait_for_refresh()
         assert state['links']['v2board.txt'] == new
         assert state['refresh_seconds'] == 600
         assert any(item['id'] == saved['id'] and item['name'] == 'Second device' and item['configured'] for item in state['hwids'])
+        restored_scope = next(item for item in state['subscriptions'] if item['id'] == scoped_id)
+        assert restored_scope['provider_ids'] == ['synthetic'] and restored_scope['links'] == scoped['links']
+        with urllib.request.urlopen(scoped_link, timeout=10) as response:
+            assert response.status == 200 and UUID.encode() in response.read()
+        checks.append('named subscription selections, independent tokens and passing feeds survive container replacement')
         try:
             urllib.request.urlopen(old, timeout=10)
             raise AssertionError('old subscription token remained valid')
@@ -143,7 +152,8 @@ assert Path('/data/logs').stat().st_mode & 0o777 == 0o700
 assert all(path.stat().st_mode & 0o777 == 0o600 for path in Path('/data/logs').iterdir())
 store = Store(Path('/data'))
 with store.connection() as connection:
-    assert [row[0] for row in connection.execute('SELECT name FROM credentials')] == ['subscription_token']
+    assert connection.execute('SELECT count(*) FROM subscriptions').fetchone()[0] == 2
+    assert connection.execute('PRAGMA user_version').fetchone()[0] == 5
 identities = {item['name']: item['id'] for item in store.hwids()}
 assert store.hwid_value(identities['DEVICE_ID']) == 'docker-authorized-id'
 assert store.hwid_value(identities['Second device']) == 'docker-second-authorized-id'

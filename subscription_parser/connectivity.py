@@ -62,6 +62,10 @@ def current_result(entry, target, results, max_age, now=None):
         return result('unsupported', 'Configuration dependencies are unavailable')
     value = results.get(entry.identity, {}).get(target, {})
     if value.get('fingerprint') != key:
+        # The same logical server can have different native settings in two
+        # providers. A scoped feed must use the result for its exact settings.
+        value = results.get(entry.identity + ':' + key, {}).get(target, {})
+    if value.get('fingerprint') != key:
         return result('pending', 'Waiting for a connection check')
     if not value.get('checked_ts'):
         return value
@@ -199,24 +203,29 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
 def check_entries(entries, root, *, stop=None, previous=None, progress=None, tester=probe):
     stop = stop or threading.Event()
     previous = previous or {}
-    records, jobs = {}, []
-    for entry in unique_entries(entries):
-        records[entry.identity] = {}
+    records, jobs, seen = {}, [], set()
+    for entry in [*unique_entries(entries), *entries]:
+        records.setdefault(entry.identity, {})
         for core in CORES:
             if core not in entry.outputs:
-                records[entry.identity][core] = result('unsupported', 'No compatible configuration for this core')
+                records[entry.identity].setdefault(core, result('unsupported', 'No compatible configuration for this core'))
                 continue
             try:
                 key = fingerprint(entry, core)
             except protocols.Error:
-                records[entry.identity][core] = result('unsupported', 'Configuration dependencies are unavailable')
+                records[entry.identity].setdefault(core, result('unsupported', 'Configuration dependencies are unavailable'))
                 continue
-            jobs.append((entry, core, key))
+            if (entry.identity, core, key) in seen:
+                continue
+            seen.add((entry.identity, core, key))
+            record_id = entry.identity if core not in records[entry.identity] else entry.identity + ':' + key
+            records.setdefault(record_id, {})[core] = result('pending', fingerprint=key)
+            jobs.append((entry, core, key, record_id))
     # Oldest/never-checked nodes go first so large lists cannot starve at the tail.
-    jobs.sort(key=lambda job: previous.get(job[0].identity, {}).get(job[1], {}).get('checked_ts', 0))
+    jobs.sort(key=lambda job: previous.get(job[3], {}).get(job[1], {}).get('checked_ts', 0))
     deadline = time.monotonic() + BATCH_TIMEOUT
     def run(job):
-        entry, core, key = job
+        entry, core, key, _ = job
         if stop.is_set() or time.monotonic() >= deadline:
             return result('pending', 'Batch time limit reached; retry scheduled', fingerprint=key)
         try:
@@ -229,8 +238,8 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='connection-check') as pool:
         futures = {pool.submit(run, job): job for job in jobs}
         for done, future in enumerate(as_completed(futures), 1):
-            entry, core, _ = futures[future]
-            records[entry.identity][core] = future.result()
+            _, core, _, record_id = futures[future]
+            records[record_id][core] = future.result()
             if progress:
                 progress(done, len(jobs))
     return records

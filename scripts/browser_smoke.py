@@ -223,6 +223,77 @@ def main():
                 assert {line.split('://', 1)[0] for line in response.text().splitlines()} == {'vless', 'ss'}
                 checks.append('copy and fetch V2Board URI subscription')
 
+                legacy_link = v2board_link
+                # The earlier replacement intentionally invalidated Demo 1's
+                # cache. Refresh the synthetic providers before scoping feeds.
+                page.locator('#refresh-button').click()
+                expect(page.locator('#provider-rows tr').first.locator('.server-count')).to_have_text('2', timeout=15000)
+                expect(page.locator('#add-subscription')).to_be_enabled(timeout=15000)
+                subscription_fetches = len(seen)
+                providers = manager.store.config()['providers']
+                page.locator('#add-subscription').click()
+                page.locator('#subscription-name').fill('My phone <private>')
+                page.locator('#save-subscription').click()
+                expect(page.locator('#subscription-error')).to_contain_text('Choose one or more')
+                page.locator('#subscription-provider-choices input[value="'+providers[0]['id']+'"]').check()
+                page.locator('#save-subscription').click()
+                expect(page.locator('#subscription-dialog')).not_to_be_visible()
+                expect(page.locator('#subscription-total')).to_have_text('2')
+                phone_id = page.locator('#subscription-select').input_value()
+                expect(page.locator('#subscription-summary')).to_contain_text('2 of 2 servers included')
+                page.locator('[data-copy="combined.json"]').click()
+                phone_link = page.evaluate('navigator.clipboard.readText()')
+                phone_archive = page.request.get(phone_link).json()
+                assert {source for node in phone_archive['servers'] for source in node['sources']} == {providers[0]['name']}
+                page.locator('#edit-subscription').click()
+                page.locator('#subscription-provider-choices input[value="'+providers[1]['id']+'"]').check()
+                page.locator('#save-subscription').click()
+                expect(page.locator('#subscription-dialog')).not_to_be_visible()
+                expect(page.locator('#subscription-providers-summary')).to_contain_text(providers[1]['name'])
+                assert {source for node in page.request.get(phone_link).json()['servers'] for source in node['sources']} == {p['name'] for p in providers}
+                checks.append('create scoped subscriptions, require a provider and edit selections without changing links')
+
+                page.locator('#add-subscription').click()
+                page.locator('#subscription-name').fill('Family')
+                page.locator('#subscription-all').check()
+                expect(page.locator('#subscription-provider-choices input').first).to_be_disabled()
+                page.locator('#save-subscription').click()
+                expect(page.locator('#subscription-dialog')).not_to_be_visible()
+                family_id = page.locator('#subscription-select').input_value()
+                expect(page.locator('#subscription-total')).to_have_text('3')
+                page.locator('[data-copy="v2board.txt"]').click()
+                family_link = page.evaluate('navigator.clipboard.readText()')
+                assert family_link != legacy_link
+                page.locator('#subscription-select').select_option(phone_id)
+                page.once('dialog', lambda dialog: dialog.accept())
+                page.locator('#rotate-links').click()
+                expect(page.locator('#toast')).to_contain_text('New subscription links')
+                assert page.request.get(phone_link).status == 404
+                assert page.request.get(family_link).status == 200
+                assert page.request.get(legacy_link).status == 200
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                page.locator('#edit-subscription').click()
+                expect(page.locator('#subscription-name')).to_have_value('My phone <private>')
+                assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-dialog-mobile.png',full_page=True)
+                page.locator('[data-close=subscription-dialog]').first.click()
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-mobile.png',full_page=True)
+                page.set_viewport_size({'width':1440,'height':1000})
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-desktop.png',full_page=True)
+                page.once('dialog', lambda dialog: dialog.accept())
+                page.locator('#delete-subscription').click()
+                expect(page.locator('#subscription-select')).to_have_value('default')
+                expect(page.locator('#delete-subscription')).to_be_disabled()
+                expect(page.locator('#subscription-total')).to_have_text('2')
+                page.locator('#subscription-select').select_option(family_id)
+                assert page.request.get(family_link).status == 200
+                assert len(seen) == subscription_fetches
+                checks.append('independent subscription links, rotation, deletion, safe names and mobile controls without extra fetches')
+
                 page.locator('[data-page=providers]').click()
                 page.locator('[data-action=edit]').first.click()
                 page.locator('#provider-name').fill('Renamed provider')

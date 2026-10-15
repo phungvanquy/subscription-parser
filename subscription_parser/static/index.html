@@ -54,20 +54,24 @@
         </section>
 
         <section id="exports-section" class="page-section">
-          <div class="section-heading"><div><h2>Your subscription links</h2><p>Add a link to your client once. Its contents update with your providers.</p></div><button class="text-button" id="rotate-links">Rotate links <span data-icon="refresh"></span></button></div>
+          <div class="section-heading"><div><h2>Your subscriptions <span id="subscription-total" class="count-pill">1</span></h2><p>Create separate links for any selection of providers.</p></div><button class="button primary small" id="add-subscription">New subscription</button></div>
+          <div class="subscription-toolbar panel">
+            <div class="subscription-picker"><label for="subscription-select">Subscription</label><select id="subscription-select"></select><p id="subscription-summary" class="hint"></p><p id="subscription-providers-summary" class="hint"></p></div>
+            <div class="subscription-actions"><button class="button secondary small" id="edit-subscription">Edit providers</button><button class="button secondary small" id="rotate-links">Rotate links</button><button class="button secondary small" id="delete-subscription">Delete</button></div>
+          </div>
           <div id="export-cards" class="export-grid"></div>
-          <div class="notice info"><span data-icon="info"></span><p>Each client gets its own native format. Protocols and credentials stay intact; compatibility exceptions appear below.</p></div>
+          <div class="notice info"><span data-icon="info"></span><p>These links include only passing servers from this subscription's enabled providers. Provider fetches and connection checks are shared across subscriptions.</p></div>
         </section>
 
         <section id="servers-section" class="panel page-section" hidden>
           <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Only recently passing nodes appear in subscription links. Failed nodes stay here for retries.</p></div><button id="check-servers" class="button secondary small"><span data-icon="network"></span>Check servers</button></div>
           <div class="notice info"><p id="connection-summary">HTTPS checks run from this server through Mihomo and Xray.</p></div>
           <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select><select id="connection-filter" aria-label="Filter connection status"><option value="">All results</option><option value="passing">Passing</option><option value="excluded">Excluded</option></select></div>
-          <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>MIHOMO CHECK</th><th>XRAY CHECK</th><th>IN SUBSCRIPTIONS</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>HTTPS response time · Results reflect this server’s network</span></div>
+          <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>MIHOMO CHECK</th><th>XRAY CHECK</th><th>PASSING FORMATS</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>HTTPS response time · Results reflect this server’s network</span></div>
         </section>
 
         <section id="diagnostics-section" class="panel page-section">
-          <div class="panel-heading"><div><h2>Compatibility notes <span id="issue-total" class="count-pill">0</span></h2><p>Settings that need their original client configuration.</p></div><select id="issue-client" aria-label="Filter compatibility notes"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div><div id="issue-rows" class="issue-list"></div>
+          <div class="panel-heading"><div><h2>Compatibility notes <span id="issue-total" class="count-pill">0</span></h2><p>Settings that need their original client configuration, across all enabled providers.</p></div><select id="issue-client" aria-label="Filter compatibility notes"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div><div id="issue-rows" class="issue-list"></div>
         </section>
 
         <section id="logs-section" class="panel page-section" hidden>
@@ -92,6 +96,17 @@
       </main>
     </div>
   </div>
+
+  <dialog id="subscription-dialog"><form id="subscription-form">
+    <div class="dialog-heading"><div><span class="eyebrow">OUTPUT SUBSCRIPTION</span><h2 id="subscription-dialog-title">New subscription</h2></div><button type="button" class="icon-button" data-close="subscription-dialog" aria-label="Close">×</button></div>
+    <input type="hidden" id="subscription-id">
+    <label for="subscription-name">Name</label><input id="subscription-name" maxlength="80" required placeholder="e.g. My phone, Family, Provider A + B">
+    <label class="check-label"><input type="checkbox" id="subscription-all">All enabled providers, including future additions</label>
+    <fieldset id="subscription-provider-options"><legend>Choose one or more providers</legend><div id="subscription-provider-choices"></div></fieldset>
+    <p class="hint">Paused providers stay selected but contribute no servers until enabled. Editing a selection keeps this subscription's URLs.</p>
+    <div id="subscription-error" class="form-error" role="alert"></div>
+    <div class="dialog-actions"><button type="button" class="button secondary" data-close="subscription-dialog">Cancel</button><button type="submit" class="button primary" id="save-subscription">Save subscription</button></div>
+  </form></dialog>
 
   <dialog id="provider-dialog"><form id="provider-form">
     <div class="dialog-heading"><div><span class="eyebrow">SUBSCRIPTION SOURCE</span><h2 id="provider-dialog-title">Add a provider</h2></div><button type="button" class="icon-button" data-close="provider-dialog" aria-label="Close">×</button></div>
