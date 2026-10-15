@@ -12,6 +12,7 @@ htmlcov/
 .parser-state/
 .tools/
 /data/
+/logs/
 backups/
 *.sqlite*
 *.db

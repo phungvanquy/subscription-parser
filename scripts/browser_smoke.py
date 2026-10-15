@@ -251,6 +251,29 @@ def main():
                 assert manager.store.config()['check_seconds'] == 900
                 checks.append('persist independent connection-check schedule')
 
+                page.locator('[data-page=activity]').click()
+                expect(page.locator('#log-output')).to_contain_text('Subscription job completed')
+                expect(page.locator('#log-retention')).to_contain_text('4 MiB maximum')
+                manager.logs.write('provider_failed', provider_id='browser-test', reason='provider returned HTTP 429')
+                page.locator('#log-level').select_option('warning')
+                expect(page.locator('#log-output')).to_contain_text('provider returned HTTP 429')
+                expect(page.locator('#log-output')).not_to_contain_text('[INFO]')
+                manager.logs.write('request_failed', error=RuntimeError('browser-private-log-secret'))
+                page.locator('#log-level').select_option('error')
+                expect(page.locator('#log-output')).to_contain_text('Application request failed')
+                expect(page.locator('#log-output')).not_to_contain_text('[WARNING]')
+                expect(page.locator('#log-output')).not_to_contain_text('browser-private-log-secret')
+                page.locator('#refresh-logs').click()
+                expect(page.locator('#refresh-logs')).to_be_enabled()
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/logs-desktop.png',full_page=True)
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/logs-mobile.png',full_page=True)
+                page.set_viewport_size({'width':1440,'height':1000})
+                checks.append('private debug history, severity filters, manual refresh and mobile log view')
+
                 page.locator('[data-page=overview]').click()
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
                 page.set_viewport_size({'width':390, 'height':844})

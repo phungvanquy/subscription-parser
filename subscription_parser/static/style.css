@@ -13,3 +13,4 @@
 @media(max-width:640px){.sidebar nav .nav-item{padding:12px 9px}.device-list{padding:0 18px}.dialog-actions{flex-wrap:wrap}.device-actions .button{flex-grow:1}}
 
 .connection-time{display:block;max-width:190px;margin-top:6px;white-space:normal;line-height:1.5;color:var(--muted)}#servers-section .notice{margin:0 23px 20px}#servers-section .panel-heading{gap:14px;flex-wrap:wrap}#servers-section .filters{flex-wrap:wrap}#servers-section td{vertical-align:top}#connection-summary{line-height:1.7}
+.log-output{margin:0;padding:18px 23px;border-top:1px solid var(--line);max-height:480px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--ink);background:#fafcfb}

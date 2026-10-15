@@ -15,6 +15,7 @@ import yaml
 
 from . import common, connectivity, protocols, v2board
 from .fetch import fetch_subscription
+from .debug_log import DebugLog
 from .storage import Store
 from .validation import checked_combine
 
@@ -26,6 +27,7 @@ class Busy(common.SubscriptionError):
 class Manager:
     def __init__(self, root: Path, fetcher=fetch_subscription, checker=None):
         self.store = Store(root)
+        self.logs = DebugLog(self.store.root)
         self.fetcher = fetcher
         self.checker = checker or connectivity.check_entries
         self.guard = threading.RLock()
@@ -77,13 +79,17 @@ class Manager:
         fingerprint = self.request_fingerprint(provider)
         status = {"id": provider["id"], "status": "unavailable", "count": 0, "protocols": {}}
         entries = []
+        stage = 'fetch'
         try:
             if not download:
                 raise LookupError
             hwid = self.store.hwid_value(provider['hwid_id']) if provider['hwid_id'] is not None else None
             body, metadata = self.fetcher(provider["url"], hwid, provider["user_agent"], 25)
+            stage = 'parse'
             entries = protocols.parse(body, provider["name"])
+            stage = 'validate'
             accepted = checked_combine(entries, self.store.root)
+            self.log_validation(accepted, provider['id'])
             if not any(accepted["counts"].values()):
                 raise common.SubscriptionError("provider response has no client-accepted servers")
             common.atomic_write(cache_path, common.json_text({"fingerprint": fingerprint, "metadata": metadata,
@@ -92,6 +98,7 @@ class Manager:
         except (common.SubscriptionError, OSError, ValueError, LookupError, RecursionError) as exc:
             if not isinstance(exc, LookupError):
                 status["error"] = str(exc) if isinstance(exc, common.SubscriptionError) else "provider could not be fetched or parsed"
+                self.logs.write('provider_failed', provider_id=provider['id'], stage=stage, error=exc)
             try:
                 cache = json.loads(common.read_limited(cache_path))
                 if cache["fingerprint"] == fingerprint:
@@ -101,15 +108,42 @@ class Manager:
                                   fetched_at=cache["metadata"].get("fetched_at"))
                     if not download and previous.get("error"):
                         status["error"] = previous["error"]
-            except (OSError, ValueError, KeyError, common.SubscriptionError, RecursionError):
-                pass
+                    if download:
+                        self.logs.write('cache_used', provider_id=provider['id'])
+            except (OSError, ValueError, KeyError, common.SubscriptionError, RecursionError) as error:
+                if not isinstance(error, FileNotFoundError):
+                    self.logs.write('cache_failed', provider_id=provider['id'], error=error)
         unique = {entry.identity: entry for entry in entries}
         status.update(count=len(unique), protocols=dict(Counter(e.protocol for e in unique.values())))
         return entries, status
 
+    def log_validation(self, combined, provider_id=None):
+        for core, result in combined.get('validation', {}).items():
+            if result.get('rejected'):
+                self.logs.write('validation_failed', core=core, provider_id=provider_id, rejected=result['rejected'])
+            elif result.get('status') == 'not_installed':
+                self.logs.write('validator_missing', core=core, provider_id=provider_id)
+
+    def log_checks(self, previous, results):
+        counts = Counter()
+        for identity, cores in results.items():
+            for core, value in cores.items():
+                status = value.get('status')
+                counts[status] += 1
+                old = previous.get(identity, {}).get(core, {})
+                if status in {'failed', 'error'} and (status, value.get('reason')) != (old.get('status'), old.get('reason')):
+                    self.logs.write('node_error' if status == 'error' else 'node_failed', node_id=identity[:16],
+                                    core=core, reason=value.get('reason'))
+                elif status == 'passed' and old.get('status') in {'failed', 'error'}:
+                    self.logs.write('node_recovered', node_id=identity[:16], core=core)
+        self.logs.write('checks_completed', passed=counts['passed'], failed=counts['failed'], errors=counts['error'])
+
     def refresh(self, selected=None, download=True, check=None):
         started = time.monotonic()
         check = download if check is None else check
+        operation = 'refresh' if download else 'connection check' if check else 'configuration update'
+        stage = 'fetch'
+        self.logs.write('run_started', operation=operation)
         try:
             with self.guard:
                 self.busy_action = 'fetching' if download else 'checking' if check else 'updating'
@@ -125,16 +159,22 @@ class Manager:
             for provider in config["providers"]:
                 if not provider["enabled"]:
                     statuses[provider["id"]] = {"id": provider["id"], "status": "disabled", "count": 0, "protocols": {}}
+            stage = 'validate'
             accepted = checked_combine(entries, self.store.root)
+            self.log_validation(accepted)
             results = self.snapshot.get('connectivity', {})
             if check:
+                stage = 'check'
                 with self.guard:
                     self.busy_action = 'checking'
                 def progress(done, total):
                     with self.guard:
                         self.check_progress = {'done': done, 'total': total}
+                previous = results
                 results = self.checker(entries, self.store.root, stop=self.stop,
                                        previous=results, progress=progress)
+                self.log_checks(previous, results)
+            stage = 'publish'
             max_age = config['check_seconds'] * 2
             evaluated_at = time.time()
             filtered = connectivity.filtered_entries(entries, results, max_age, evaluated_at)
@@ -185,7 +225,10 @@ class Manager:
                 if not check and pending:
                     # Let consecutive saves in a bulk import finish first.
                     self.next_check = time.time() + 5
-        except Exception:
+            self.logs.write('run_completed', operation=operation, servers=event['servers'], published=event['published'],
+                            cached=event['cached'], seconds=event['seconds'])
+        except Exception as error:
+            self.logs.write('run_failed', operation=operation, stage=stage, error=error)
             # Details can contain upstream secrets; expose only a fixed error.
             with self.guard:
                 self.snapshot["last_error"] = "refresh failed; the last completed subscription is still available"
@@ -309,6 +352,7 @@ class Manager:
             body, metadata = self.fetcher(provider['url'], hwid, provider['user_agent'], 25)
             entries = protocols.parse(body, provider['name'])
             result = checked_combine(entries, self.store.root)
+            self.log_validation(result, provider['id'])
             if not any(result['counts'].values()):
                 raise common.SubscriptionError('no compatible servers were returned; check the subscription and device ID')
             token = secrets.token_urlsafe(24)
@@ -318,13 +362,16 @@ class Manager:
                     self.previews.pop(next(iter(self.previews)))
                 self.previews[token] = {'provider': provider, 'previous': previous, 'fingerprint': fingerprint,
                     'body': body, 'metadata': metadata, 'expires': time.monotonic() + 600}
+            self.logs.write('provider_tested', provider_id=provider['id'], servers=len(entries))
             return {'test_token': token, 'counts': result['counts'], 'tested_at': common.now()}
         except common.SubscriptionError as error:
+            self.logs.write('provider_test_failed', provider_id=provider['id'], error=error)
             message = str(error).replace(provider['url'], '[subscription]')
             if hwid:
                 message = message.replace(hwid, '[device ID]')
             raise common.SubscriptionError(message) from None
-        except (OSError, ValueError, RecursionError):
+        except (OSError, ValueError, RecursionError) as error:
+            self.logs.write('provider_test_failed', provider_id=provider['id'], error=error)
             raise common.SubscriptionError('fetch test failed; check the subscription URL and provider availability') from None
         finally:
             with self.guard:
@@ -348,6 +395,7 @@ class Manager:
 
     def scheduler(self):
         while not self.stop.wait(2):
+            self.logs.maintain()
             with self.guard:
                 due = not self.busy and time.time() >= self.next_refresh
                 check_due = not self.busy and time.time() >= self.next_check
@@ -358,6 +406,9 @@ class Manager:
                     self.begin_check()
             except Busy:
                 pass
+            except Exception as error:
+                self.logs.write('scheduler_failed', error=error)
+                self.stop.wait(30)
 
     def public_state(self, base_url):
         with self.guard:

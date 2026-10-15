@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import threading
 import time
+from typing import Literal
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
@@ -77,6 +78,7 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
     async def lifespan(app):
         lock = common.process_lock(manager.store.directory / "app.lock")
         with lock:
+            manager.logs.write('started')
             worker = None
             if start_scheduler:
                 worker = threading.Thread(target=manager.scheduler, daemon=True, name="subscription-scheduler")
@@ -87,6 +89,7 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
                 worker.join(timeout=3)
             if manager.worker:
                 manager.worker.join(timeout=60)
+            manager.logs.write('stopped')
 
     app = FastAPI(title="subscription_parser", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.manager = manager
@@ -126,7 +129,11 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
             origin = request.headers.get("origin")
             if origin and origin.rstrip("/") != str(request.base_url).rstrip("/"):
                 return JSONResponse({"detail": "cross-origin changes are not allowed"}, status_code=403)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as error:
+            manager.logs.write('request_failed', error=error)
+            response = JSONResponse({'detail': 'internal error; check the admin logs'}, status_code=500)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["X-Frame-Options"] = "DENY"
@@ -181,6 +188,10 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
     @app.get("/api/state", dependencies=[Depends(admin)])
     def state(request: Request):
         return manager.public_state(public_url or str(request.base_url))
+
+    @app.get('/api/logs', dependencies=[Depends(admin)])
+    def logs(level: Literal['all', 'warning', 'error'] = 'all'):
+        return manager.logs.recent(level)
 
     @app.post("/api/providers", dependencies=[Depends(admin)], status_code=201)
     def add_provider(body: Provider):

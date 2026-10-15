@@ -23,16 +23,38 @@ function icon(name){return `<svg viewBox="0 0 24 24" fill="none" stroke="current
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
 const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state=null,page='overview',toastTimer,pollTimer;
+let logRequest=0;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
-const titles={overview:['SUBSCRIPTION WORKSPACE','Your connections, together.','One library. Multiple providers. Ready for your favorite client.','Overview'],providers:['YOUR SOURCES','Every provider, in one place.','Add subscriptions and keep their device identities consistent.','Providers'],servers:['COMBINED LIBRARY','Find your next connection.','Explore your servers and see which clients can import them.','Server library'],exports:['READY TO IMPORT','One link for your client.','Stable subscription links, updated automatically from your providers.','Subscription links'],activity:['WORKSPACE HISTORY','Every refresh, accounted for.','See recent fetches, cached responses and provider changes.','Activity'],devices:['SAVED DEVICES','Your device identities.','See where each device is used and manage its saved ID.','Devices'],settings:['WORKSPACE SETTINGS','Keep things running your way.','Manage your subscription refresh schedule.','Settings']};
+const titles={overview:['SUBSCRIPTION WORKSPACE','Your connections, together.','One library. Multiple providers. Ready for your favorite client.','Overview'],providers:['YOUR SOURCES','Every provider, in one place.','Add subscriptions and keep their device identities consistent.','Providers'],servers:['COMBINED LIBRARY','Find your next connection.','Explore your servers and see which clients can import them.','Server library'],exports:['READY TO IMPORT','One link for your client.','Stable subscription links, updated automatically from your providers.','Subscription links'],activity:['WORKSPACE HISTORY','Activity and logs.','Review recent events and debug problems with subscriptions.','Activity & logs'],devices:['SAVED DEVICES','Your device identities.','See where each device is used and manage its saved ID.','Devices'],settings:['WORKSPACE SETTINGS','Keep things running your way.','Manage your subscription refresh schedule.','Settings']};
 async function api(path,options={}){const response=await fetch('/api'+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});let data;try{data=await response.json();}catch{throw new Error('The server returned an unexpected response.');}if(!response.ok){if(response.status===401&&path!='/login')showLogin();throw new Error(data.detail||'Request failed');}return data;}
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
 function relative(value){if(!value)return 'Never';const seconds=Math.max(0,(Date.now()-new Date(value).getTime())/1000);if(seconds<60)return 'Just now';if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;return new Date(value).toLocaleDateString();}
 function date(value){return value?new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
 function interval(value){return value===3600?'Hourly':value>=3600?`${value/3600} hours`:`${value/60} min`;}
-function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);$('workspace').hidden=true;$('login-view').hidden=false;state=null;}
-function selectPage(name){page=name;document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===name));const t=titles[name];$('page-eyebrow').textContent=t[0];$('page-title').textContent=t[1];$('page-description').textContent=t[2];$('breadcrumb-page').textContent=t[3];$('overview-stats').hidden=name!=='overview';const visible={overview:['providers','exports','diagnostics'],providers:['providers'],servers:['servers','diagnostics'],exports:['exports','diagnostics'],activity:['activity'],devices:['devices'],settings:['settings']}[name];document.querySelectorAll('.page-section').forEach(s=>s.hidden=!visible.includes(s.id.replace('-section','')));window.scrollTo({top:0,behavior:'instant'});}
+function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;state=null;}
+function selectPage(name){page=name;document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===name));const t=titles[name];$('page-eyebrow').textContent=t[0];$('page-title').textContent=t[1];$('page-description').textContent=t[2];$('breadcrumb-page').textContent=t[3];$('overview-stats').hidden=name!=='overview';const visible={overview:['providers','exports','diagnostics'],providers:['providers'],servers:['servers','diagnostics'],exports:['exports','diagnostics'],activity:['logs','activity'],devices:['devices'],settings:['settings']}[name];document.querySelectorAll('.page-section').forEach(s=>s.hidden=!visible.includes(s.id.replace('-section','')));window.scrollTo({top:0,behavior:'instant'});if(name==='activity')loadLogs();}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>selectPage(b.dataset.page)));
+async function loadLogs(){
+  if(!state||page!=='activity')return;
+  const request=++logRequest;$('refresh-logs').disabled=true;
+  try{
+    const data=await api('/logs?level='+encodeURIComponent($('log-level').value));
+    if(request!==logRequest||!state||page!=='activity')return;
+    $('log-retention').textContent=`Latest ${data.limit} matching events · ${data.retention_days} days · ${data.max_bytes/1048576} MiB maximum. Older entries are removed automatically.`;
+    const lines=data.entries.map(event=>{
+      const context=Object.entries(event.context||{}).map(([key,value])=>{
+        if(key==='provider_id')return `provider=${state.providers.find(p=>p.id===value)?.name||value} (${value})`;
+        if(key==='node_id')return `server=${state.inventory.find(n=>n.id===value)?.name||value} (${value})`;
+        return `${key}=${Array.isArray(value)?value.join(' ← '):value}`;
+      }).join(' · ');
+      return `${new Date(event.time).toLocaleString()} [${event.level.toUpperCase()}] ${event.message}${context?'\n  '+context:''}`;
+    });
+    $('log-output').textContent=(data.available?'':'Log storage is unavailable; check the data volume permissions and free space.\n\n')+(lines.join('\n\n')||'No matching events.');
+  }catch(error){if(request===logRequest&&state)$('log-output').textContent=error.message;}
+  finally{if(request===logRequest)$('refresh-logs').disabled=false;}
+}
+$('refresh-logs').addEventListener('click',loadLogs);
+$('log-level').addEventListener('change',loadLogs);
 async function loadState(){clearTimeout(pollTimer);try{state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
 function render(){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
@@ -233,6 +255,6 @@ async function copy(text){if(navigator.clipboard&&window.isSecureContext){await 
 $('export-cards').addEventListener('click',async event=>{const button=event.target.closest('[data-copy]');if(!button)return;try{await copy(state.links[button.dataset.copy]);toast('Subscription link copied');}catch(error){toast(error.message);}});
 $('rotate-links').addEventListener('click',async()=>{if(!confirm('Generate new subscription links? Existing links will stop working and must be updated in your clients.'))return;try{await api('/rotate-link',{method:'POST'});await loadState();toast('New subscription links are ready');}catch(error){toast(error.message);}});
 $('schedule-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({refresh_seconds:Number($('refresh-interval').value)})});await loadState();toast('Refresh schedule saved');}catch(error){toast(error.message);}});
-$('login-form').addEventListener('submit',async event=>{event.preventDefault();$('login-error').textContent='';try{await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value})});$('admin-key').value='';await loadState();}catch(error){$('login-error').textContent=error.message;}});
+$('login-form').addEventListener('submit',async event=>{event.preventDefault();$('login-error').textContent='';try{await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value})});$('admin-key').value='';await loadState();if(page==='activity')loadLogs();}catch(error){$('login-error').textContent=error.message;}});
 $('logout-button').addEventListener('click',async()=>{await api('/logout',{method:'POST'});showLogin();});
 (async()=>{try{const session=await api('/session');if(session.authenticated)await loadState();else showLogin();}catch{showLogin();$('login-error').textContent='Unable to reach the server. Please try again.';}})();

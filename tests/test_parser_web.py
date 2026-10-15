@@ -67,6 +67,62 @@ class WebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json(), {'status': 'ok'})
 
+    def test_debug_logs_require_admin_and_have_bounded_validated_filters(self):
+        self.assertEqual(self.client.get('/api/logs').status_code, 401)
+        self.login()
+        self.manager.logs.write('provider_failed')
+        self.manager.logs.write('request_failed')
+        response = self.client.get('/api/logs?level=error')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+        data = response.json()
+        self.assertEqual([entry['level'] for entry in data['entries']], ['error'])
+        self.assertEqual((data['limit'], data['max_bytes'], data['retention_days']), (200, 4 * 1024 * 1024, 7))
+        self.assertEqual(self.client.get('/api/logs?level=invalid').status_code, 422)
+        self.client.post('/api/logout')
+        self.assertEqual(self.client.get('/api/logs').status_code, 401)
+
+    def test_failed_fetch_and_unexpected_job_error_are_logged_without_secrets(self):
+        self.login(); self.add(); self.refresh()
+        original = self.manager.fetcher
+        with patch.object(self.manager, 'fetcher', side_effect=common.SubscriptionError('provider returned HTTP 429')):
+            self.refresh()
+        records = self.client.get('/api/logs').json()['entries']
+        self.assertTrue(any(e['event'] == 'cache_used' for e in records))
+        self.assertTrue(any(e['context'].get('reason') == 'provider returned HTTP 429' for e in records))
+        with patch.object(self.manager, 'fetcher', side_effect=RuntimeError('private-token authorized-device-id ' + UUID)):
+            self.manager.refresh()
+        data = self.client.get('/api/logs').json()
+        failed = next(e for e in data['entries'] if e['event'] == 'run_failed')
+        self.assertEqual(failed['context']['stage'], 'fetch')
+        self.assertEqual(failed['context']['error_type'], 'RuntimeError')
+        self.assertTrue(failed['context']['trace'])
+        for secret in ['private-token', 'authorized-device-id', UUID, self.token]:
+            self.assertNotIn(secret, json.dumps(data))
+        self.assertIs(self.manager.fetcher, original)
+
+    def test_check_logs_capture_failure_and_recovery_without_repeating_unchanged_failure(self):
+        identity = '1' * 64
+        failed = {identity: {'mihomo': {'status': 'failed', 'reason': 'HTTPS request failed or returned an unexpected response on both endpoints'}}}
+        self.manager.log_checks({}, failed)
+        self.manager.log_checks(failed, failed)
+        self.manager.log_checks(failed, {identity: {'mihomo': {'status': 'passed'}}})
+        events = [entry['event'] for entry in self.manager.logs.recent()['entries']]
+        self.assertEqual(events.count('node_failed'), 1)
+        self.assertEqual(events.count('node_recovered'), 1)
+        self.assertEqual(events.count('checks_completed'), 3)
+
+    def test_unexpected_request_exception_has_a_safe_response_and_log(self):
+        self.login()
+        with patch.object(self.manager, 'public_state', side_effect=RuntimeError('request-secret-value')):
+            response = self.client.get('/api/state')
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.headers['cache-control'], 'no-store')
+        self.assertNotIn('request-secret-value', response.text)
+        data = self.client.get('/api/logs').json()
+        self.assertTrue(any(entry['event'] == 'request_failed' for entry in data['entries']))
+        self.assertNotIn('request-secret-value', json.dumps(data))
+
     def test_runtime_data_directory_is_independent_of_application_source(self):
         with patch.dict(common.os.environ, {'PARSER_DATA_DIR': str(self.root)}):
             app = create_app(start_scheduler=False)

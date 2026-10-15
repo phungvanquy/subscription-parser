@@ -107,6 +107,7 @@ def main():
         state = api('/api/state')
         new = state['links']['v2board.txt']
         assert new != old
+        log_entry = api('/api/logs')['entries'][0]
         compose('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '60')
         state = wait_for_refresh()
         assert state['links']['v2board.txt'] == new
@@ -118,6 +119,16 @@ def main():
         except urllib.error.HTTPError as error:
             assert error.code == 404
         checks.append('container replacement preserves HWIDs, rotated subscription links, settings and cache')
+        logs = api('/api/logs')
+        assert logs['available'] and log_entry in logs['entries']
+        assert logs['max_bytes'] == 4 * 1024 * 1024 and logs['retention_days'] == 7
+        assert all(secret not in json.dumps(logs) for secret in (admin, subscription, provider_url, UUID, 'docker-authorized-id'))
+        try:
+            urllib.request.urlopen(base + '/api/logs', timeout=10)
+            raise AssertionError('debug logs were accessible without admin authentication')
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        checks.append('private bounded debug history survives container replacement without exposing credentials')
         verification = '''
 import os
 from pathlib import Path
@@ -128,6 +139,8 @@ assert not Path('/app/.parser-state').exists()
 assert os.environ['PARSER_ADMIN_TOKEN'] == 'docker-smoke-admin-key'
 assert not Path('/data/.env').exists()
 assert Path('/data/app.sqlite3').stat().st_mode & 0o777 == 0o600
+assert Path('/data/logs').stat().st_mode & 0o777 == 0o700
+assert all(path.stat().st_mode & 0o777 == 0o600 for path in Path('/data/logs').iterdir())
 store = Store(Path('/data'))
 with store.connection() as connection:
     assert [row[0] for row in connection.execute('SELECT name FROM credentials')] == ['subscription_token']

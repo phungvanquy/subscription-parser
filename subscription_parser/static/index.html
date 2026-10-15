@@ -30,7 +30,7 @@
         <button class="nav-item" data-page="devices" aria-label="Devices"><span data-icon="shield"></span>Devices</button>
         <button class="nav-item" data-page="servers"><span data-icon="server"></span>Server library</button>
         <button class="nav-item" data-page="exports"><span data-icon="link"></span>Subscription links</button>
-        <button class="nav-item" data-page="activity"><span data-icon="clock"></span>Activity</button>
+        <button class="nav-item" data-page="activity"><span data-icon="clock"></span>Activity &amp; logs</button>
       </nav>
       <div class="sidebar-bottom"><button class="nav-item" data-page="settings"><span data-icon="settings"></span>Settings</button><div class="sidebar-note"><span class="tiny-dot"></span> Fixed device identities<small>Saved privately on your server</small></div></div>
     </aside>
@@ -70,6 +70,11 @@
           <div class="panel-heading"><div><h2>Compatibility notes <span id="issue-total" class="count-pill">0</span></h2><p>Settings that need their original client configuration.</p></div><select id="issue-client" aria-label="Filter compatibility notes"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div><div id="issue-rows" class="issue-list"></div>
         </section>
 
+        <section id="logs-section" class="panel page-section" hidden>
+          <div class="panel-heading"><div><h2>Debug logs</h2><p id="log-retention">Recent events, newest first. Older logs are removed automatically.</p></div></div>
+          <div class="filters"><select id="log-level" aria-label="Filter logs"><option value="all">All events</option><option value="warning">Warnings &amp; errors</option><option value="error">Errors only</option></select><button id="refresh-logs" class="button secondary small">Refresh logs</button></div>
+          <pre id="log-output" class="log-output" aria-label="Debug log entries">Loading logs…</pre>
+        </section>
         <section id="activity-section" class="panel page-section" hidden><div class="panel-heading"><div><h2>Recent activity</h2><p>The last 20 refreshes and provider changes.</p></div></div><div id="activity-rows"></div></section>
 
         <section id="devices-section" class="panel page-section" hidden>

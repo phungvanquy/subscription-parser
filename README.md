@@ -183,6 +183,25 @@ Use Docker Compose 2.24.4+ on Linux arm64 or amd64. The image includes Python
 and pinned, checksum-verified Mihomo, Hiddify and Xray validators. It runs as
 UID/GID 10001 with a read-only application filesystem and a writable data volume.
 
+The admin **Activity & logs** page shows the latest 200 debug events with a
+severity filter and manual refresh. It records failed provider requests, cached
+fallbacks, validation problems, connection failures/recoveries and job summaries.
+Repeated unchanged node failures are summarized instead of logged individually.
+Logs persist in `/data/logs`, outside `.env` and the application database. Each
+file is capped at 1 MiB, with three rotated backups: at most **4 MiB total**.
+Entries older than **seven days** are hidden immediately and deleted on startup
+and hourly, including when there are no new events. Busy systems may retain less
+history because the size limit takes priority. No retention configuration is
+needed. Container stdout/stderr separately retains its existing Docker limit of
+three 10 MB files.
+
+Only admins can read debug logs. Messages use fixed templates and internal IDs;
+URLs, HWIDs, credentials, provider payloads and raw core output are excluded.
+Unexpected exceptions include their type and source locations, without exception
+text, source lines or local variables. Logging I/O failures do not interrupt
+subscription jobs; the log viewer reports when storage is unavailable. CI build
+failures remain in GitHub Actions, and startup failures remain in Docker logs.
+
 Core versions, release filenames and official SHA256 digests for both architectures
 are pinned in `scripts/client-cores.lock.json`. Builds download those release files
 directly and verify their hashes before installing them; they do not query GitHub's
