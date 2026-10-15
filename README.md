@@ -183,6 +183,13 @@ Use Docker Compose 2.24.4+ on Linux arm64 or amd64. The image includes Python
 and pinned, checksum-verified Mihomo, Hiddify and Xray validators. It runs as
 UID/GID 10001 with a read-only application filesystem and a writable data volume.
 
+Core versions, release filenames and official SHA256 digests for both architectures
+are pinned in `scripts/client-cores.lock.json`. Builds download those release files
+directly and verify their hashes before installing them; they do not query GitHub's
+REST API or need a GitHub token. Temporary download failures have bounded retries.
+When upgrading a core, update its version, filenames and digests together using
+the official release metadata, then verify builds for both architectures.
+
 For a **new installation**:
 
 ```sh

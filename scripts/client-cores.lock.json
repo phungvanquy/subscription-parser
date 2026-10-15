@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "binary": "mihomo",
+      "repository": "MetaCubeX/mihomo",
+      "version": "v1.19.32",
+      "assets": {
+        "amd64": {
+          "name": "mihomo-linux-amd64-v1.19.32.gz",
+          "sha256": "8451100836c9eda194331c2babfad490b2faf30cebc1a04b0e76fd8ac2d35d10"
+        },
+        "arm64": {
+          "name": "mihomo-linux-arm64-v1.19.32.gz",
+          "sha256": "9dd862e28b46ff7d775f169cceebc28deccaa0a9e804237d421cd2571e0caba0"
+        }
+      }
+    },
+    {
+      "binary": "hiddify-core",
+      "repository": "hiddify/hiddify-core",
+      "version": "v5.0.0",
+      "assets": {
+        "amd64": {
+          "name": "hiddify-core-linux-amd64-glibc.tar.gz",
+          "sha256": "862d6a2172f48e348cd4be3d9ef2ad51b3310f551304285613909d475fc0b815"
+        },
+        "arm64": {
+          "name": "hiddify-core-linux-arm64-glibc.tar.gz",
+          "sha256": "698d48b841caca532bccaadf433bbacbe64fbf715abe3e9473040698c807a26d"
+        }
+      }
+    },
+    {
+      "binary": "xray",
+      "repository": "XTLS/Xray-core",
+      "version": "v26.3.27",
+      "assets": {
+        "amd64": {
+          "name": "Xray-linux-64.zip",
+          "sha256": "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+        },
+        "arm64": {
+          "name": "Xray-linux-arm64-v8a.zip",
+          "sha256": "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+        }
+      }
+    }
+  ]
+}

@@ -8,6 +8,7 @@
 !subscription_parser/**
 !scripts/
 !scripts/install_client_cores.py
+!scripts/client-cores.lock.json
 !scripts/import_state.py
 !scripts/browser_smoke.py
 !scripts/connectivity_fixture.py

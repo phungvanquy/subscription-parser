@@ -1,22 +1,71 @@
 #!/usr/bin/env python3
-"""Install pinned official client validators; verify each release asset's SHA256."""
+"""Install official client validators using checked-in versions and SHA256 pins."""
 import argparse
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import tarfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
+
+LOCK_FILE = Path(__file__).with_name('client-cores.lock.json')
+MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024
+DOWNLOAD_ATTEMPTS = 3
 
 
 def download(url):
     request = urllib.request.Request(url, headers={"User-Agent": "subscription-parser-setup"})
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read(256 * 1024 * 1024)
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        delay = 2 ** (attempt + 1)
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = response.read(MAX_DOWNLOAD_BYTES + 1)
+            if len(data) > MAX_DOWNLOAD_BYTES:
+                raise SystemExit('Client release asset exceeds the download size limit.')
+            return data
+        except urllib.error.HTTPError as error:
+            # Ordinary 403/404 errors are not transient. An explicit Retry-After
+            # can mark a 403 as throttling; never retry before that deadline.
+            retry_after = (error.headers or {}).get('Retry-After')
+            if error.code not in {429, 500, 502, 503, 504} and not (error.code == 403 and retry_after):
+                raise SystemExit(f'Client release download failed: HTTP {error.code}.') from None
+            if retry_after:
+                if not retry_after.isdigit() or int(retry_after) > 60:
+                    raise SystemExit('Release host requested a longer retry delay; retry the build later.') from None
+                delay = max(delay, int(retry_after))
+            elif error.code == 429:
+                delay = 60
+            reason = f'HTTP {error.code}'
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead):
+            reason = 'network interruption'
+        if attempt + 1 == DOWNLOAD_ATTEMPTS:
+            raise SystemExit(f'Client release download failed after {DOWNLOAD_ATTEMPTS} attempts ({reason}).')
+        print(f'Client release download interrupted ({reason}); retrying in {delay}s.', flush=True)
+        time.sleep(delay)
+
+
+def specifications(architecture):
+    """Resolve immutable download inputs without querying GitHub's REST API."""
+    lock = json.loads(LOCK_FILE.read_text())
+    if lock.get('schema_version') != 1:
+        raise SystemExit('Unsupported client core lock file version.')
+    resolved = []
+    for release in lock['releases']:
+        asset = release['assets'][architecture]
+        digest = asset.get('sha256')
+        if not isinstance(digest, str) or not re.fullmatch(r'[a-f0-9]{64}', digest):
+            raise SystemExit('A valid pinned SHA256 is required for every client release asset.')
+        url = f"https://github.com/{release['repository']}/releases/download/{release['version']}/{asset['name']}"
+        resolved.append((release['binary'], release['version'], asset['name'], digest, url))
+    return resolved
 
 
 def main():
@@ -30,18 +79,9 @@ def main():
         raise SystemExit("Unsupported architecture; install official validators in .tools manually.")
     destination = args.destination
     destination.mkdir(mode=0o700, exist_ok=True)
-    specifications = [
-        ("mihomo", "MetaCubeX/mihomo", "v1.19.32", f"mihomo-linux-{architecture}-v1.19.32.gz"),
-        ("hiddify-core", "hiddify/hiddify-core", "v5.0.0", f"hiddify-core-linux-{architecture}-glibc.tar.gz"),
-        ("xray", "XTLS/Xray-core", "v26.3.27", "Xray-linux-arm64-v8a.zip" if architecture == "arm64" else "Xray-linux-64.zip"),
-    ]
-    for binary, repository, version, asset_name in specifications:
-        metadata = json.loads(download(f"https://api.github.com/repos/{repository}/releases/tags/{version}"))
-        asset = next((asset for asset in metadata["assets"] if asset["name"] == asset_name), None)
-        if not asset or not str(asset.get("digest", "")).startswith("sha256:"):
-            raise SystemExit(f"Official SHA256 metadata unavailable for {asset_name}; installation stopped.")
-        data = download(asset["browser_download_url"])
-        if "sha256:" + hashlib.sha256(data).hexdigest() != asset["digest"]:
+    for binary, version, asset_name, digest, url in specifications(architecture):
+        data = download(url)
+        if hashlib.sha256(data).hexdigest() != digest:
             raise SystemExit(f"Checksum mismatch for {asset_name}; installation stopped.")
         if asset_name.endswith(".tar.gz"):
             with tarfile.open(fileobj=io.BytesIO(data)) as archive:

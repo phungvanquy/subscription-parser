@@ -12,7 +12,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 FROM base AS cores
-COPY scripts/install_client_cores.py /build/install_client_cores.py
+COPY scripts/install_client_cores.py scripts/client-cores.lock.json /build/
 RUN python /build/install_client_cores.py --destination /opt/client-cores \
     && chmod -R a+rX /opt/client-cores
 
@@ -38,6 +38,7 @@ USER root
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY --chown=10001:10001 tests ./tests
+COPY --chown=10001:10001 scripts/install_client_cores.py scripts/client-cores.lock.json ./scripts/
 COPY --chown=10001:10001 scripts/browser_smoke.py ./scripts/browser_smoke.py
 COPY --chown=10001:10001 scripts/connectivity_fixture.py ./scripts/connectivity_fixture.py
 USER parser
