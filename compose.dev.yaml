@@ -1,0 +1,33 @@
+name: subscription-parser-dev
+
+services:
+  app:
+    image: subscription-parser:dev
+    build:
+      target: development
+    restart: "no"
+    read_only: false
+    environment:
+      PARSER_PUBLIC_URL: ${PARSER_DEV_PUBLIC_URL:-}
+    ports: !override
+      - "127.0.0.1:${PARSER_DEV_PORT:-8100}:8099"
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./subscription_parser
+          target: /app/subscription_parser
+          ignore:
+            - __pycache__/
+        - action: sync
+          path: ./tests
+          target: /app/tests
+          ignore:
+            - __pycache__/
+        - action: rebuild
+          path: ./requirements.txt
+        - action: rebuild
+          path: ./requirements-dev.txt
+        - action: rebuild
+          path: ./scripts
+        - action: rebuild
+          path: ./Dockerfile

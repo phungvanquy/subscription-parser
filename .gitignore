@@ -1,0 +1,27 @@
+# Python and local development
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.DS_Store
+
+# Private runtime data and downloaded tools
+.parser-state/
+.tools/
+/data/
+backups/
+*.sqlite*
+*.db
+*.db-*
+legacy-backup/
+*.log
+*.bak
+
+# Deployment secrets; only the empty template belongs in Git
+.env
+.env.*
+*.env
+!.env.example

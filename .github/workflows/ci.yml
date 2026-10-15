@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build development image
+        run: docker build --target development -t subscription-parser:ci-dev .
+
+      - name: Run tests
+        run: >-
+          docker run --rm --read-only --tmpfs /tmp:mode=1777
+          subscription-parser:ci-dev python -m unittest discover -s tests -v
+
+      - name: Build production image
+        run: docker build --target production -t subscription-parser:ci .
+
+      - name: Verify production deployment with synthetic subscriptions
+        env:
+          PARSER_IMAGE: subscription-parser:ci
+        run: python3 scripts/docker_smoke.py

@@ -1,0 +1,37 @@
+name: subscription-parser
+
+services:
+  app:
+    image: ${PARSER_IMAGE:-subscription-parser:local}
+    build:
+      context: .
+      target: production
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 75s
+    ports:
+      - "${PARSER_BIND_ADDRESS:-127.0.0.1}:${PARSER_PORT:-8099}:8099"
+    environment:
+      PARSER_DATA_DIR: /data
+      PARSER_TOOLS_DIR: /opt/client-cores
+      PARSER_PUBLIC_URL: ${PARSER_PUBLIC_URL:-}
+      PARSER_ADMIN_TOKEN: ${PARSER_ADMIN_TOKEN:?Set PARSER_ADMIN_TOKEN in .env}
+      # Trust the configured reverse proxy and local Docker bridge.
+      FORWARDED_ALLOW_IPS: ${PARSER_TRUSTED_PROXIES:-127.0.0.1,172.16.0.0/12}
+    volumes:
+      - data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  data:

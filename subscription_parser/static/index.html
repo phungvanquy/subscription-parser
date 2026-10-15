@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>subscription_parser — Your subscription workspace</title>
+  <meta name="description" content="Combine your proxy subscriptions into one private library, with native exports for Mihomo, Hiddify and Xray.">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <section id="login-view" class="login-view" hidden>
+    <div class="login-story">
+      <a class="brand" href="/"><span class="brand-mark">s<span>p</span></span><span>subscription<span class="brand-light">_parser</span></span></a>
+      <div class="login-copy"><span class="eyebrow">YOUR CONNECTIONS, ORGANIZED</span><h1>Many providers.<br>One place.</h1><p>A private workspace for your subscriptions.<br>Bring them together. Take them anywhere.</p>
+        <div class="flow-visual" aria-hidden="true"><div class="flow-inputs"><span>VLESS <i></i></span><span>VMESS <i></i></span><span>HYSTERIA <i></i></span></div><div class="flow-lines"><b></b><b></b><b></b></div><div class="flow-hub">sp</div><div class="flow-output"><span>MIHOMO <b>↗</b></span><span>HIDDIFY <b>↗</b></span></div></div>
+      </div><span class="login-foot">SELF HOSTED · YOUR SERVER · YOUR SUBSCRIPTIONS</span>
+    </div>
+    <div class="login-form-wrap"><form id="login-form"><span class="small-pill">PRIVATE WORKSPACE</span><h2>Welcome back.</h2><p>Sign in to manage your subscription library.</p><label for="admin-key">Admin key</label><input id="admin-key" type="password" autocomplete="current-password" placeholder="Enter your admin key" required><div id="login-error" class="form-error" role="alert"></div><button class="button primary full" type="submit">Open workspace <span>→</span></button><p class="login-hint">Use the admin key provided by your server administrator.</p></form></div>
+  </section>
+
+  <div id="workspace" class="workspace" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/"><span class="brand-mark">s<span>p</span></span><span>subscription<br><span class="brand-light">_parser</span></span></a>
+      <div class="workspace-label"><span class="workspace-icon">P</span><div>Personal workspace<small>Self hosted</small></div><span class="tiny-dot"></span></div>
+      <div class="nav-label">WORKSPACE</div>
+      <nav aria-label="Main navigation">
+        <button class="nav-item active" data-page="overview"><span data-icon="grid"></span>Overview</button>
+        <button class="nav-item" data-page="providers"><span data-icon="layers"></span>Providers<span id="nav-provider-count" class="nav-count">0</span></button>
+        <button class="nav-item" data-page="devices" aria-label="Devices"><span data-icon="shield"></span>Devices</button>
+        <button class="nav-item" data-page="servers"><span data-icon="server"></span>Server library</button>
+        <button class="nav-item" data-page="exports"><span data-icon="link"></span>Subscription links</button>
+        <button class="nav-item" data-page="activity"><span data-icon="clock"></span>Activity</button>
+      </nav>
+      <div class="sidebar-bottom"><button class="nav-item" data-page="settings"><span data-icon="settings"></span>Settings</button><div class="sidebar-note"><span class="tiny-dot"></span> Fixed device identities<small>Saved privately on your server</small></div></div>
+    </aside>
+    <div class="main-shell">
+      <header class="topbar"><div class="breadcrumb">Workspace <span>/</span> <strong id="breadcrumb-page">Overview</strong></div><div class="topbar-right"><span class="service-status"><i></i> Service online</span><button class="avatar" id="logout-button" title="Sign out" aria-label="Sign out">SP</button></div></header>
+      <main>
+        <div class="page-heading"><div><span class="eyebrow" id="page-eyebrow">SUBSCRIPTION WORKSPACE</span><h1 id="page-title">Your connections, together.</h1><p id="page-description">One library. Multiple providers. Ready for your favorite client.</p></div><div class="heading-actions"><button id="refresh-button" class="button secondary"><span data-icon="refresh"></span><span class="refresh-label">Refresh all</span></button><button class="button primary" id="add-provider"><span data-icon="plus"></span>Add provider</button></div></div>
+        <div id="global-error" class="notice warning" role="alert" hidden></div>
+        <section id="overview-stats" class="stats-grid" aria-label="Subscription statistics">
+          <article class="stat-card"><span class="stat-icon teal" data-icon="layers"></span><span class="stat-label">Active providers</span><strong id="stat-providers">—</strong><small id="stat-provider-detail">Loading subscriptions</small></article>
+          <article class="stat-card"><span class="stat-icon blue" data-icon="server"></span><span class="stat-label">Combined servers</span><strong id="stat-servers">—</strong><small id="stat-duplicate-detail">Your complete server library</small></article>
+          <article class="stat-card"><span class="stat-icon violet" data-icon="network"></span><span class="stat-label">Protocols</span><strong id="stat-protocols">—</strong><small id="stat-protocol-detail">Original protocols preserved</small></article>
+          <article class="stat-card"><span class="stat-icon orange" data-icon="clock"></span><span class="stat-label">Auto refresh</span><strong id="stat-interval" class="stat-text">Hourly</strong><small id="stat-next">Next refresh scheduled</small></article>
+        </section>
+
+        <section id="providers-section" class="panel page-section">
+          <div class="panel-heading"><div><h2>Subscription providers <span id="provider-total" class="count-pill">0</span></h2><p>Your sources, each with its own saved device identity.</p></div><span class="subtle-label" id="last-refresh">Not refreshed yet</span></div>
+          <div class="table-scroll"><table><thead><tr><th>PROVIDER</th><th>STATUS</th><th>SERVERS</th><th>DEVICE ID</th><th>LAST FETCH</th><th class="align-right">ACTIONS</th></tr></thead><tbody id="provider-rows"></tbody></table></div>
+          <div id="providers-empty" class="empty-state" hidden><span data-icon="layers"></span><h3>Start with your first provider</h3><p>Add a subscription link and choose its authorized device ID.</p><button class="button primary" id="empty-add">Add provider</button></div>
+          <div class="panel-footer"><span><i class="tiny-dot"></i> HWIDs stay fixed across refreshes</span><span id="provider-footer">HTTPS subscriptions · Credentials kept private</span></div>
+        </section>
+
+        <section id="exports-section" class="page-section">
+          <div class="section-heading"><div><h2>Your subscription links</h2><p>Add a link to your client once. Its contents update with your providers.</p></div><button class="text-button" id="rotate-links">Rotate links <span data-icon="refresh"></span></button></div>
+          <div id="export-cards" class="export-grid"></div>
+          <div class="notice info"><span data-icon="info"></span><p>Each client gets its own native format. Protocols and credentials stay intact; compatibility exceptions appear below.</p></div>
+        </section>
+
+        <section id="servers-section" class="panel page-section" hidden>
+          <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Duplicates combined by connection settings and account credentials.</p></div></div>
+          <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div>
+          <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>AVAILABLE FOR</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>Conversion verified separately from live connectivity</span></div>
+        </section>
+
+        <section id="diagnostics-section" class="panel page-section">
+          <div class="panel-heading"><div><h2>Compatibility notes <span id="issue-total" class="count-pill">0</span></h2><p>Settings that need their original client configuration.</p></div><select id="issue-client" aria-label="Filter compatibility notes"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div><div id="issue-rows" class="issue-list"></div>
+        </section>
+
+        <section id="activity-section" class="panel page-section" hidden><div class="panel-heading"><div><h2>Recent activity</h2><p>The last 20 refreshes and provider changes.</p></div></div><div id="activity-rows"></div></section>
+
+        <section id="devices-section" class="panel page-section" hidden>
+          <div class="panel-heading"><div><h2>Saved devices <span id="device-total" class="count-pill">0</span></h2><p>Manage device IDs and see exactly which subscriptions use them.</p></div><button class="button secondary small" id="add-hwid">Add device</button></div>
+          <div id="hwid-rows" class="device-list"></div>
+          <div class="panel-footer">Saved means stored here. Test a subscription to check whether its provider accepts the selected ID.</div>
+        </section>
+
+        <section id="settings-section" class="page-section settings-grid" hidden>
+
+          <div class="panel"><div class="panel-heading"><div><h2>Refresh schedule</h2><p>Keep all enabled providers up to date.</p></div></div><form id="schedule-form" class="settings-form"><label for="refresh-interval">Refresh every</label><select id="refresh-interval"><option value="300">5 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select><p class="hint">When a provider is unavailable, its last successful response is kept and marked as cached.</p><button class="button primary" type="submit">Save schedule</button></form></div>
+        </section>
+        <footer class="main-footer"><span>subscription_parser <span class="footer-dot">·</span> Your server. Your subscriptions.</span><span id="footer-time"></span></footer>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="provider-dialog"><form id="provider-form">
+    <div class="dialog-heading"><div><span class="eyebrow">SUBSCRIPTION SOURCE</span><h2 id="provider-dialog-title">Add a provider</h2></div><button type="button" class="icon-button" data-close="provider-dialog" aria-label="Close">×</button></div>
+    <input type="hidden" id="provider-id">
+    <label for="provider-name">Provider name</label><input id="provider-name" maxlength="80" placeholder="e.g. My provider">
+    <label for="provider-url">Subscription links</label><textarea id="provider-url" rows="3"></textarea><p class="hint" id="provider-url-hint"></p>
+    <div class="field-label"><label for="provider-hwid">Device ID</label><button type="button" class="text-button" id="provider-new-hwid">+ Add device</button></div>
+    <select id="provider-hwid" required></select>
+    <div id="provider-assignments" hidden></div>
+    <p class="hint">Choose a device for each link. Select “No device ID” only when the provider does not require one.</p>
+    <label for="provider-agent">Client user agent</label><input id="provider-agent" value="Happ/2.3.1" maxlength="200" required>
+    <p class="hint">Test fetch contacts the provider with your selected device. Saving a successful test reuses that response.</p>
+    <div id="provider-test-result" class="test-result" role="status" hidden></div>
+    <div id="provider-error" class="form-error" role="alert"></div>
+    <div class="dialog-actions"><button type="button" class="button secondary" data-close="provider-dialog">Cancel</button><button type="button" class="button secondary" id="test-provider">Test fetch</button><button type="submit" class="button primary" id="save-provider" disabled>Save provider</button></div>
+  </form></dialog>
+  <dialog id="hwid-dialog"><form id="hwid-form">
+    <div class="dialog-heading"><div><span class="eyebrow">SAVED DEVICE</span><h2>Add a device</h2></div><button type="button" class="icon-button" data-close="hwid-dialog" aria-label="Close">×</button></div>
+    <label for="hwid-name">Device label</label><input id="hwid-name" placeholder="e.g. My Hiddify device" maxlength="100" required>
+    <label for="hwid-value">Existing device ID</label><input id="hwid-value" type="password" autocomplete="off" minlength="10" maxlength="64" required>
+    <p class="hint">Use the ID authorized for your subscription. Adding it here does not contact a provider.</p><div id="hwid-error" class="form-error" role="alert"></div>
+    <div class="dialog-actions"><button type="button" class="button secondary" data-close="hwid-dialog">Cancel</button><button type="submit" class="button primary">Save device</button></div>
+  </form></dialog>
+  <dialog id="device-rename-dialog"><form id="device-rename-form">
+    <div class="dialog-heading"><h2>Rename device</h2><button type="button" class="icon-button" data-close="device-rename-dialog" aria-label="Close">×</button></div>
+    <label for="device-new-name">Device label</label><input id="device-new-name" maxlength="100" required><p class="hint">Renaming keeps the device ID and subscription assignments unchanged.</p>
+    <div id="device-rename-error" class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button secondary" data-close="device-rename-dialog">Cancel</button><button type="submit" class="button primary">Save name</button></div>
+  </form></dialog>
+  <dialog id="device-reveal-dialog">
+    <div class="dialog-heading"><h2 id="device-reveal-title">Device ID</h2><button type="button" class="icon-button" data-close="device-reveal-dialog" aria-label="Close">×</button></div>
+    <label for="device-revealed-value">Saved device ID</label><input id="device-revealed-value" readonly autocomplete="off"><p class="hint">This value will be hidden after one minute or when you leave this window.</p>
+    <div class="dialog-actions"><button type="button" class="button secondary" data-close="device-reveal-dialog">Hide</button><button type="button" class="button primary" id="copy-revealed-device">Copy ID</button></div>
+  </dialog>
+  <dialog id="device-replace-dialog"><form id="device-replace-form">
+    <div class="dialog-heading"><h2>Replace device ID</h2><button type="button" class="icon-button" data-close="device-replace-dialog" aria-label="Close">×</button></div>
+    <p class="hint" id="device-replace-name"></p><p class="hint">These subscriptions will use the replacement on their next fetch:</p><ul id="device-replace-usage" class="device-usage"></ul>
+    <label for="device-replacement-value">Replacement authorized device ID</label><input id="device-replacement-value" type="password" autocomplete="off" minlength="10" maxlength="64" required>
+    <p class="hint">Cached servers from the old ID will be removed for these subscriptions. The provider may count the replacement as another device.</p>
+    <label class="check-label"><input type="checkbox" id="device-replace-confirm" required>I have reviewed these subscriptions and want to replace their device ID.</label>
+    <div id="device-replace-error" class="form-error" role="alert"></div><div class="dialog-actions"><button type="button" class="button secondary" data-close="device-replace-dialog">Cancel</button><button type="submit" class="button primary">Replace ID</button></div>
+  </form></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
