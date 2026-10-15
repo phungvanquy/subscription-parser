@@ -12,7 +12,7 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn
 from playwright.sync_api import sync_playwright, expect
-from subscription_parser import common
+from subscription_parser import common, connectivity
 from subscription_parser.app import create_app
 from unittest.mock import patch
 
@@ -25,6 +25,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="parser-browser-") as temporary:
         root = Path(temporary)
         seen = []
+        failed_nodes = set()
         def fetch(url, hwid, user_agent, timeout):
             seen.append(hwid)
             return json.dumps({'outbounds': [
@@ -34,7 +35,11 @@ def main():
                  'method': 'aes-128-gcm', 'password': 'synthetic-password'}]}).encode(), {'fetched_at': common.now()}
         admin = 'synthetic-browser-admin-key'
         with patch.dict(os.environ, {'PARSER_ADMIN_TOKEN': admin}):
-            app = create_app(root, start_scheduler=False, fetcher=fetch)
+            def checker(entries, root, **kwargs):
+                return connectivity.check_entries(entries, root, **kwargs,
+                    tester=lambda node, *args: {'status': 'failed', 'reason': 'HTTPS check failed'}
+                    if node.name in failed_nodes else {'status': 'passed', 'latency_ms': 12})
+            app = create_app(root, start_scheduler=False, fetcher=fetch, checker=checker)
         manager = app.state.manager
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
@@ -98,6 +103,13 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 page.locator('[data-page=overview]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
+                page.locator('[data-page=servers]').click()
+                page.locator('#check-servers').click()
+                expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
+                expect(page.locator('#server-rows')).to_contain_text('Passed')
+                assert len(seen)==2
+                checks.append('cached connection checks publish passing nodes without another provider fetch')
+                page.locator('[data-page=overview]').click()
                 expect(page.locator('#stat-servers')).to_have_text('2', timeout=15000)
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 checks.append('explicit per-link devices, test-before-save and reuse of tested responses')
@@ -164,6 +176,29 @@ def main():
                 expect(page.locator('#server-rows')).to_contain_text('No servers match')
                 checks.append('server search and protocol filters')
 
+                page.locator('#server-search').fill('')
+                page.locator('#protocol-filter').select_option('')
+                failed_nodes.add('Tokyo')
+                fetch_count = len(seen)
+                page.locator('#check-servers').click()
+                expect(page.locator('#connection-summary')).to_contain_text('1 of 2 nodes included',timeout=15000)
+                page.locator('#connection-filter').select_option('excluded')
+                expect(page.locator('#server-rows tr')).to_have_count(1)
+                expect(page.locator('#server-rows')).to_contain_text('Tokyo')
+                expect(page.locator('#server-rows')).to_contain_text('Failed')
+                page.locator('#connection-filter').select_option('')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/servers-desktop.png',full_page=True)
+                    page.set_viewport_size({'width':390,'height':844})
+                    assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/servers-mobile.png',full_page=True)
+                    page.set_viewport_size({'width':1440,'height':1000})
+                failed_nodes.clear()
+                page.locator('#check-servers').click()
+                expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
+                assert len(seen) == fetch_count
+                checks.append('show failed nodes, filter excluded results and recover without fetching providers')
+
                 page.locator('[data-page=exports]').click()
                 page.locator('[data-copy="hiddify.json"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
@@ -210,6 +245,11 @@ def main():
                 expect(page.locator('#toast')).to_contain_text('saved')
                 assert manager.store.config()['refresh_seconds'] == 900
                 checks.append('persist refresh schedule')
+                page.locator('#check-interval').select_option('900')
+                page.locator('#check-schedule-form button').click()
+                expect(page.locator('#toast')).to_contain_text('Connection check schedule saved')
+                assert manager.store.config()['check_seconds'] == 900
+                checks.append('persist independent connection-check schedule')
 
                 page.locator('[data-page=overview]').click()
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from subscription_parser import common
+from subscription_parser import common, connectivity
 from subscription_parser.app import create_app
 from subscription_parser.service import Manager
 
@@ -29,7 +29,10 @@ class WebTests(unittest.TestCase):
         def fetch(url, hwid, user_agent, timeout):
             self.seen.append((url, hwid))
             return payload(), {"fetched_at": common.now(), "http_status": 200}
-        self.app = create_app(self.root, start_scheduler=False, fetcher=fetch)
+        def checker(entries, root, **kwargs):
+            return connectivity.check_entries(entries, root, **kwargs,
+                tester=lambda *args: {'status': 'passed', 'latency_ms': 12})
+        self.app = create_app(self.root, start_scheduler=False, fetcher=fetch, checker=checker)
         self.manager = self.app.state.manager
         self.hwid = self.manager.store.add_hwid('My device', 'authorized-device-id')['id']
         self.client = TestClient(self.app)
@@ -346,7 +349,11 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.post('/api/providers',json=body|{'test_token':tested.json()['test_token']}).status_code,201)
         self.assertEqual(len(self.seen),1)
         self.assertEqual(self.client.get('/api/state').json()['providers'][0]['status'],'fresh')
+        self.assertEqual(self.client.get('/api/state').json()['counts']['v2board'],0)
+        self.assertEqual(self.client.post('/api/check-servers').status_code,202)
+        self.manager.worker.join(5)
         self.assertEqual(self.client.get('/api/state').json()['counts']['v2board'],1)
+        self.assertEqual(len(self.seen),1)
 
     def test_failed_fetch_preview_leaves_assignments_and_published_data_unchanged(self):
         self.login(); provider=self.add(); self.refresh()

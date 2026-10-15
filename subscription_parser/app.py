@@ -57,10 +57,11 @@ class DeviceReplacement(BaseModel):
 
 
 class Settings(BaseModel):
-    refresh_seconds: int = Field(ge=300, le=86400)
+    refresh_seconds: int | None = Field(default=None, ge=300, le=86400)
+    check_seconds: int | None = Field(default=None, ge=300, le=86400)
 
 
-def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription):
+def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, checker=None):
     # Read once: recreating the container applies a changed deployment key.
     admin_token = admin_key()
     root = Path(root or os.environ.get('PARSER_DATA_DIR') or Path(__file__).resolve().parent.parent)
@@ -69,7 +70,7 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription):
         legacy = common.load_environment(root / '.env', inherit_process=False)
         if legacy.get('PARSER_PUBLIC_URL') and not public_url:
             raise common.SubscriptionError('set PARSER_PUBLIC_URL in deployment configuration before migrating')
-    manager = Manager(root, fetcher)
+    manager = Manager(root, fetcher, checker)
     attempts, attempt_lock = {}, threading.Lock()
 
     @asynccontextmanager
@@ -203,6 +204,11 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription):
         manager.begin_refresh(provider_id)
         return {"started": True}
 
+    @app.post('/api/check-servers', dependencies=[Depends(admin)], status_code=202)
+    def check_servers():
+        manager.begin_check()
+        return {'started': True}
+
     @app.post("/api/hwids", dependencies=[Depends(admin)], status_code=201)
     def add_hwid(body: HWID):
         return manager.store.add_hwid(body.name, body.value.strip())
@@ -230,11 +236,10 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription):
 
     @app.put("/api/settings", dependencies=[Depends(admin)])
     def settings(body: Settings):
-        with manager.guard:
-            config = manager.store.config()
-            config["refresh_seconds"] = body.refresh_seconds
-            manager.store.save_config(config)
-            manager.next_refresh = time.time() + body.refresh_seconds
+        values = body.model_dump(exclude_none=True)
+        if not values:
+            raise common.SubscriptionError('provide a refresh or connection-check interval')
+        manager.change_settings(values)
         return {"saved": True}
 
     @app.post("/api/rotate-link", dependencies=[Depends(admin)])
@@ -248,10 +253,12 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription):
         if not hmac.compare_digest(token.encode(), expected.encode()) or filename not in {"hiddify.json", "mihomo.yaml", "xray.json", "v2board.txt", "combined.json"}:
             raise HTTPException(404, "subscription not found")
         with manager.guard:
+            if not manager.publication_current(manager.snapshot):
+                raise HTTPException(503, 'connection checks are pending or expired; check servers in the dashboard')
             content = manager.snapshot.get("exports", {}).get(filename)
             target = {"hiddify.json": "hiddify", "mihomo.yaml": "mihomo", "xray.json": "xray", "v2board.txt": "v2board"}.get(filename)
             if target and not manager.snapshot.get("counts", {}).get(target):
-                raise HTTPException(503, "no compatible servers available; check provider status in the dashboard")
+                raise HTTPException(503, "no recently passing servers available for this client; check the server library")
         if content is None:
             raise HTTPException(503, "subscription has not been refreshed yet")
         headers = {"Content-Disposition": f'inline; filename="{filename}"', "profile-update-interval": "1",

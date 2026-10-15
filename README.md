@@ -17,8 +17,10 @@ and is never rewritten by the app.
    provider does not require one. **Add device** saves an existing authorized ID.
 3. Choose **Test fetch**, review the results, then save. Saving reuses the tested
    response without fetching again. Failed tests leave saved providers unchanged.
-4. Open **Subscription links** and copy the Hiddify JSON or Mihomo YAML link into
-   your client. These links remain stable when you add, remove or update providers.
+4. Open **Server library** to see the automatic connection checks, or choose
+   **Check servers** to run them immediately using saved subscriptions.
+5. Open **Subscription links** and copy the Hiddify JSON or Mihomo YAML link into
+   your client. Only recently passing nodes are included; the URLs remain stable.
 
 The server stores each authorized HWID in SQLite and sends that exact value as `x-hwid` on
 each fetch. It never generates replacement IDs to retry a device-limit error.
@@ -101,7 +103,61 @@ server currently accepts connections. If validators are absent on another
 installation, the API reports `not_installed`; install them before relying on
 native passthrough validation.
 
-Original provider responses, refresh history and published snapshots live
+## Connection checks and filtering
+
+After fetching and validating subscriptions, the app starts an isolated Mihomo
+or Xray client for each compatible node. A small HTTPS request must travel
+through that node, pass TLS certificate verification and return HTTP 204.
+The first endpoint is `https://www.gstatic.com/generate_204`; a failed request
+is retried against `https://cp.cloudflare.com/generate_204`. There is no direct
+connection fallback. The client listeners bind only to loopback, and temporary
+configs and core processes are removed after each check.
+
+**Server library** shows separate Mihomo and Xray results, response time, last
+check time and the feeds containing each node. Failed, pending, expired,
+unsupported and checker-error states remain visible. Failed nodes stay in the
+provider cache and are tested again; they are not deleted.
+
+- Mihomo includes only nodes that recently passed through Mihomo.
+- Xray includes only nodes that recently passed through Xray, preserving required
+  outbound dependencies.
+- Hiddify and V2Board include compatible nodes that passed at least one of those
+  cores. This is a connectivity signal, not a live test inside Hiddify or V2Board;
+  client-specific behavior may differ. Unsupported conversions remain excluded.
+- The combined archive uses schema version 2: `servers` and native configurations
+  contain passing nodes; `excluded_servers` contains diagnostic metadata only.
+
+Checks run after every provider refresh and, by default, every **10 minutes**
+from cached data. **Settings → Connection checks** controls that schedule.
+**Check servers** and scheduled rechecks never download provider subscriptions
+or send HWIDs. The check interval and results live in the data volume; `.env`
+remains deployment configuration.
+
+Results expire after twice the check interval. Changed connection settings or
+credentials cannot reuse earlier results. If checks stop completing, stale
+feeds return HTTP 503; no direct fallback or untested nodes are substituted.
+A feed with no passing nodes also returns HTTP 503. Existing client downloads
+remain in the client until it successfully updates; the app cannot revoke a
+client's previously downloaded configuration.
+
+Four checks run concurrently. Each core has a five-second startup limit, each
+HTTPS attempt has an eight-second total limit, and a batch is bounded to five
+minutes. Nodes left untested by that limit are excluded and prioritized on the
+next run. Core startup problems are reported as check errors, not proof that
+the remote server is offline.
+
+Results describe connectivity **from this Docker server at the recorded time**.
+Response time includes proxy setup, TLS and the HTTP request. It is not a speed
+test, does not test all destinations or UDP traffic, and cannot guarantee the
+same result from another network.
+
+Authenticated API controls are `POST /api/check-servers` and
+`PUT /api/settings` with `check_seconds` (300–86400). `/api/state` includes
+per-node `connectivity`, `published_total`, `last_check`, `next_check`,
+`check_seconds` and progress while a batch runs. Subscription URLs and tokens
+do not change when nodes are filtered or recover.
+
+Original provider responses, refresh history, connection results and published snapshots live
 under `/data/.parser-state/`. Provider records and refresh settings live in SQLite. Publication uses an atomic snapshot, so client downloads
 cannot see partially updated exports. Deduplication includes credentials and
 chain dependencies; two different accounts on one server remain distinct.
@@ -346,6 +402,10 @@ The check uses synthetic credentials and cached provider data in a temporary
 Compose project. It verifies migration, fixed identities, all five feeds, native
 client validators, HTTPS proxy headers, token rotation and container replacement.
 It also verifies changing the admin key through deployment configuration.
+Actual Mihomo and Xray connection tests use a local VLESS server and a local
+HTTPS origin with a temporary test certificate. They cover successful traffic,
+dead ports, invalid credentials, TLS rejection and unexpected HTTP responses
+without relying on public test sites or contacting real providers.
 It removes only its own containers and volume.
 
 Optional browser checks use an isolated development container with Chromium:

@@ -39,6 +39,7 @@ COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
 COPY --chown=10001:10001 tests ./tests
 COPY --chown=10001:10001 scripts/browser_smoke.py ./scripts/browser_smoke.py
+COPY --chown=10001:10001 scripts/connectivity_fixture.py ./scripts/connectivity_fixture.py
 USER parser
 
 FROM application AS production

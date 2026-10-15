@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from . import common
 from .config import admin_key
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 CREDENTIALS_SCHEMA = """CREATE TABLE credentials (
     name TEXT PRIMARY KEY CHECK(name = 'subscription_token'),
     value TEXT NOT NULL CHECK(length(value) > 0)
@@ -40,7 +40,8 @@ CREATE TABLE hwids (
 """ + PROVIDERS_SCHEMA + """
 CREATE TABLE settings (
     id INTEGER PRIMARY KEY CHECK(id = 1),
-    refresh_seconds INTEGER NOT NULL CHECK(refresh_seconds BETWEEN 300 AND 86400)
+    refresh_seconds INTEGER NOT NULL CHECK(refresh_seconds BETWEEN 300 AND 86400),
+    check_seconds INTEGER NOT NULL DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)
 );
 """
 PROVIDER_INSERT = 'INSERT INTO providers VALUES (?, ?, ?, ?, ?, ?, ?)'
@@ -90,6 +91,8 @@ class Store:
                 self._migrate_admin_key()
             if version in {1, 2}:
                 self._migrate_devices()
+            if version in {1, 2, 3}:
+                self._migrate_connectivity()
             with self.connection() as connection:
                 if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
                     raise common.SubscriptionError('unsupported application database version')
@@ -128,7 +131,16 @@ class Store:
                 connection.execute(PROVIDERS_SCHEMA)
                 connection.execute('INSERT INTO providers SELECT * FROM old_providers')
                 connection.execute('DROP TABLE old_providers')
-                connection.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+                connection.execute('PRAGMA user_version = 3')
+
+    def _migrate_connectivity(self):
+        with common.process_lock(self.directory / 'app.lock'):
+            with self.connection(write=True) as connection:
+                if connection.execute('PRAGMA user_version').fetchone()[0] != 3:
+                    return
+                connection.execute('ALTER TABLE settings ADD COLUMN check_seconds INTEGER NOT NULL '
+                                   'DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)')
+                connection.execute('PRAGMA user_version = 4')
 
     def _legacy_inputs(self):
         env_path = self.root / '.env'
@@ -189,7 +201,7 @@ class Store:
                     connection.execute('INSERT INTO hwids (id, name, value) VALUES (?, ?, ?)', (identifier, name, value))
                 connection.execute('INSERT INTO credentials VALUES (?, ?)',
                                    ('subscription_token', env.get('PARSER_SUBSCRIPTION_TOKEN') or secrets.token_urlsafe(32)))
-                connection.execute('INSERT INTO settings VALUES (1, ?)', (config['refresh_seconds'],))
+                connection.execute('INSERT INTO settings (id, refresh_seconds) VALUES (1, ?)', (config['refresh_seconds'],))
                 for position, provider in enumerate(config['providers']):
                     connection.execute(PROVIDER_INSERT, (provider['id'], provider['name'], provider['url'],
                         identities[provider['device_id_env']], provider['user_agent'], int(provider['enabled']), position))
@@ -335,13 +347,16 @@ class Store:
                 'SELECT id, name, url, hwid_id, user_agent, enabled FROM providers ORDER BY position')]
             for provider in providers:
                 provider['enabled'] = bool(provider['enabled'])
-            return {'refresh_seconds': connection.execute('SELECT refresh_seconds FROM settings WHERE id = 1').fetchone()[0],
+            settings = dict(connection.execute('SELECT * FROM settings WHERE id = 1').fetchone())
+            return {'refresh_seconds': settings['refresh_seconds'], 'check_seconds': settings.get('check_seconds', 600),
                     'providers': providers}
 
     def save_config(self, config):
         try:
             with self.connection(write=True) as connection:
                 connection.execute('UPDATE settings SET refresh_seconds = ? WHERE id = 1', (config['refresh_seconds'],))
+                if 'check_seconds' in config:
+                    connection.execute('UPDATE settings SET check_seconds = ? WHERE id = 1', (config['check_seconds'],))
                 connection.execute('DELETE FROM providers')
                 for position, provider in enumerate(config['providers']):
                     connection.execute(PROVIDER_INSERT, (provider['id'], provider['name'], provider['url'],

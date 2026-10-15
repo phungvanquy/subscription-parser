@@ -41,7 +41,7 @@
         <div id="global-error" class="notice warning" role="alert" hidden></div>
         <section id="overview-stats" class="stats-grid" aria-label="Subscription statistics">
           <article class="stat-card"><span class="stat-icon teal" data-icon="layers"></span><span class="stat-label">Active providers</span><strong id="stat-providers">—</strong><small id="stat-provider-detail">Loading subscriptions</small></article>
-          <article class="stat-card"><span class="stat-icon blue" data-icon="server"></span><span class="stat-label">Combined servers</span><strong id="stat-servers">—</strong><small id="stat-duplicate-detail">Your complete server library</small></article>
+          <article class="stat-card"><span class="stat-icon blue" data-icon="server"></span><span class="stat-label">Passing servers</span><strong id="stat-servers">—</strong><small id="stat-duplicate-detail">Recently checked connections</small></article>
           <article class="stat-card"><span class="stat-icon violet" data-icon="network"></span><span class="stat-label">Protocols</span><strong id="stat-protocols">—</strong><small id="stat-protocol-detail">Original protocols preserved</small></article>
           <article class="stat-card"><span class="stat-icon orange" data-icon="clock"></span><span class="stat-label">Auto refresh</span><strong id="stat-interval" class="stat-text">Hourly</strong><small id="stat-next">Next refresh scheduled</small></article>
         </section>
@@ -60,9 +60,10 @@
         </section>
 
         <section id="servers-section" class="panel page-section" hidden>
-          <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Duplicates combined by connection settings and account credentials.</p></div></div>
-          <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select></div>
-          <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>AVAILABLE FOR</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>Conversion verified separately from live connectivity</span></div>
+          <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Only recently passing nodes appear in subscription links. Failed nodes stay here for retries.</p></div><button id="check-servers" class="button secondary small"><span data-icon="network"></span>Check servers</button></div>
+          <div class="notice info"><p id="connection-summary">HTTPS checks run from this server through Mihomo and Xray.</p></div>
+          <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board</option></select><select id="connection-filter" aria-label="Filter connection status"><option value="">All results</option><option value="passing">Passing</option><option value="excluded">Excluded</option></select></div>
+          <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>MIHOMO CHECK</th><th>XRAY CHECK</th><th>IN SUBSCRIPTIONS</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>HTTPS response time · Results reflect this server’s network</span></div>
         </section>
 
         <section id="diagnostics-section" class="panel page-section">
@@ -80,6 +81,7 @@
         <section id="settings-section" class="page-section settings-grid" hidden>
 
           <div class="panel"><div class="panel-heading"><div><h2>Refresh schedule</h2><p>Keep all enabled providers up to date.</p></div></div><form id="schedule-form" class="settings-form"><label for="refresh-interval">Refresh every</label><select id="refresh-interval"><option value="300">5 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option><option value="21600">6 hours</option><option value="86400">24 hours</option></select><p class="hint">When a provider is unavailable, its last successful response is kept and marked as cached.</p><button class="button primary" type="submit">Save schedule</button></form></div>
+          <div class="panel"><div class="panel-heading"><div><h2>Connection checks</h2><p>Automatically keep only recently passing servers in your links.</p></div></div><form id="check-schedule-form" class="settings-form"><label for="check-interval">Check cached servers every</label><select id="check-interval"><option value="300">5 minutes</option><option value="600">10 minutes</option><option value="900">15 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option></select><p class="hint">Mihomo and Xray each test a small HTTPS request. Checks reuse saved subscriptions and do not fetch provider links or send HWIDs. Results expire after twice this interval. Hiddify and V2Board use compatible nodes that pass at least one core; their client behavior may differ.</p><button class="button primary" type="submit">Save check schedule</button></form></div>
         </section>
         <footer class="main-footer"><span>subscription_parser <span class="footer-dot">·</span> Your server. Your subscriptions.</span><span id="footer-time"></span></footer>
       </main>

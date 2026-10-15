@@ -10,6 +10,7 @@
 !scripts/install_client_cores.py
 !scripts/import_state.py
 !scripts/browser_smoke.py
+!scripts/connectivity_fixture.py
 !tests/
 !tests/**
 **/__pycache__/

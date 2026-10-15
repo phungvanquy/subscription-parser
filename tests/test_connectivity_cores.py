@@ -1,0 +1,75 @@
+"""Actual Mihomo/Xray traffic through a local VLESS + HTTPS fixture; no Internet."""
+import copy
+import json
+import os
+from pathlib import Path
+import socket
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+from scripts.connectivity_fixture import fixture
+from subscription_parser import connectivity as c, protocols
+
+CORES = Path(os.environ.get('PARSER_TOOLS_DIR', '/opt/client-cores'))
+
+
+@unittest.skipUnless(all((CORES / core).is_file() for core in c.CORES), 'Docker image with client cores required')
+class RealCoreTests(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        (self.root / '.parser-state').mkdir()
+        manager = fixture(self.root / 'fixture', CORES / 'xray')
+        self.local = manager.__enter__()
+        self.addCleanup(manager.__exit__, None, None, None)
+        env = patch.dict(os.environ, {'PARSER_TOOLS_DIR': str(CORES),
+                        'SSL_CERT_FILE': str(self.local['certificate']), 'HTTPS_PROXY': 'http://127.0.0.1:1',
+                        'NO_PROXY': '*', 'http_proxy': 'http://127.0.0.1:1'})
+        env.start(); self.addCleanup(env.stop)
+
+    def node(self, **changes):
+        node = {**self.local['node'], **changes}
+        return protocols.parse(json.dumps({'outbounds': [node]}).encode(), 'Local')[0]
+
+    def probe(self, node, core, **kwargs):
+        return c.probe(node, core, self.root, threading.Event(), time.monotonic()+15, **kwargs)
+
+    def test_both_real_cores_tunnel_verified_https_and_cleanup(self):
+        for core in c.CORES:
+            with self.subTest(core=core):
+                value = self.probe(self.node(), core)
+                self.assertEqual(value['status'], 'passed', value)
+                self.assertGreater(value['latency_ms'], 0)
+        self.assertEqual(self.local['server'].requests, 2)
+        self.assertFalse(list((self.root / '.parser-state').iterdir()))
+
+    def test_dead_node_never_falls_back_to_direct(self):
+        with socket.socket() as closed:
+            closed.bind(('127.0.0.1', 0))
+            for core in c.CORES:
+                with self.subTest(core=core), patch.object(c, 'REQUEST_TIMEOUT', 1):
+                    value = self.probe(self.node(server_port=closed.getsockname()[1]), core)
+                    self.assertEqual(value['status'], 'failed', value)
+        self.assertEqual(self.local['server'].requests, 0)
+
+    def test_wrong_credentials_fail_actual_handshake(self):
+        for core in c.CORES:
+            with self.subTest(core=core), patch.object(c, 'REQUEST_TIMEOUT', 1):
+                value = self.probe(self.node(uuid='11234567-89ab-4cde-8fab-0123456789ab'), core)
+                self.assertEqual(value['status'], 'failed', value)
+        self.assertEqual(self.local['server'].requests, 0)
+
+    def test_tls_errors_and_wrong_http_status_are_not_success(self):
+        for core in c.CORES:
+            with self.subTest(core=core), patch.dict(os.environ, {'SSL_CERT_FILE': '/dev/null', 'SSL_CERT_DIR': '/nonexistent'}):
+                self.assertEqual(self.probe(self.node(), core)['status'], 'failed')
+        self.assertEqual(self.local['server'].requests, 0)
+        self.local['server'].response_status = 503
+        for core in c.CORES:
+            with self.subTest(core=core):
+                self.assertEqual(self.probe(self.node(), core)['status'], 'failed')
+        self.assertEqual(self.local['server'].requests, 4)

@@ -10,6 +10,7 @@ import secrets
 import socket
 import subprocess
 import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -25,6 +26,10 @@ def main():
         port = listener.getsockname()[1]
     environment = os.environ | {'PARSER_PORT': str(port), 'PARSER_BIND_ADDRESS': '127.0.0.1'}
     command = ['docker', 'compose', '-f', str(ROOT / 'compose.yaml'), '-p', project]
+    temporary = tempfile.TemporaryDirectory(prefix='parser-docker-smoke-')
+    override = Path(temporary.name) / 'fixture.yaml'
+    override.write_text(json.dumps({'services': {'app': {'command': ['python', '/data/connection-fixture.py', '--app']}}}))
+    command.extend(['-f', str(override)])
 
     def compose(*arguments, data=None):
         result = subprocess.run([*command, *arguments], input=data, capture_output=True, cwd=ROOT, env=environment, timeout=120)
@@ -61,8 +66,8 @@ def main():
         raise RuntimeError('synthetic cached provider did not refresh')
 
     provider_url = 'https://provider.invalid/docker-smoke'
-    body = json.dumps({'outbounds': [{'type': 'vless', 'tag': 'Synthetic', 'server': 'proxy.example',
-        'server_port': 443, 'uuid': UUID}]}).encode()
+    body = json.dumps({'outbounds': [{'type': 'vless', 'tag': 'Synthetic', 'server': '127.0.0.1',
+        'server_port': 20901, 'uuid': UUID}]}).encode()
     files = {
         '.env': f'DEVICE_ID=docker-authorized-id\nPARSER_ADMIN_TOKEN={admin}\nPARSER_SUBSCRIPTION_TOKEN={subscription}\nPARSER_PUBLIC_URL={base}\n',
         '.parser-state/providers.json': json.dumps({'refresh_seconds': 3600, 'providers': [{
@@ -81,15 +86,19 @@ def main():
     try:
         compose('run', '--rm', '-T', '--no-deps', 'app', 'python', 'scripts/import_state.py', '-', data=archive.getvalue())
         checks.append('streamed import preserves fixed HWID and existing application keys')
+        compose('run', '--rm', '-T', '--no-deps', 'app', 'python', '-c',
+                "import pathlib, sys; pathlib.Path('/data/connection-fixture.py').write_bytes(sys.stdin.buffer.read())",
+                data=(ROOT / 'scripts/connectivity_fixture.py').read_bytes())
         compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '60')
         assert api('/healthz') == {'status': 'ok'}
         state = wait_for_refresh()
         assert state['providers'][0]['status'] == 'cached'
         assert all(state['validation'][target]['status'] == 'passed' for target in ('hiddify', 'mihomo', 'xray'))
+        assert all(state['inventory'][0]['connectivity'][target]['status'] == 'passed' for target in ('mihomo', 'xray'))
         for link in state['links'].values():
             with urllib.request.urlopen(link, timeout=10) as response:
                 assert response.status == 200 and UUID.encode() in response.read()
-        checks.append('healthy production container serves all five feeds with all three client validators')
+        checks.append('healthy production container serves all five feeds after real Mihomo/Xray HTTPS checks through the local VLESS fixture')
         saved = api('/api/hwids', 'POST', {'name': 'Second device', 'value': 'docker-second-authorized-id'})
         api('/api/settings', 'PUT', {'refresh_seconds': 600}, proxy=True)
         checks.append('HWID writes and HTTPS reverse-proxy requests work with the writable data volume')
@@ -147,6 +156,7 @@ print('passed')
         print(json.dumps({'passed': len(checks), 'checks': checks}, indent=2))
     finally:
         compose('down', '--volumes', '--remove-orphans', '--timeout', '20')
+        temporary.cleanup()
 
 
 if __name__ == '__main__':

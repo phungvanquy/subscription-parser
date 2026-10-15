@@ -174,6 +174,35 @@ class StorageTests(unittest.TestCase):
             Store(self.root)
         self.assertFalse(store.database_path.exists())
 
+    def test_version_three_connectivity_migration_preserves_data_and_checks_rollback(self):
+        self.legacy()
+        store = Store(self.root)
+        before = store.config()
+        identities = store.hwids()
+        token = store.credential('subscription_token')
+        with store.connection(write=True) as connection:
+            connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
+            connection.execute('PRAGMA user_version = 3')
+        connect = sqlite3.connect
+        class FailingConnection(sqlite3.Connection):
+            def execute(self, sql, *args):
+                if sql == 'PRAGMA user_version = 4':
+                    raise sqlite3.OperationalError('simulated disk failure')
+                return super().execute(sql, *args)
+        with patch('subscription_parser.storage.sqlite3.connect', side_effect=lambda *a, **kw: connect(*a, **kw, factory=FailingConnection)):
+            with self.assertRaises(common.SubscriptionError):
+                Store(self.root)
+        with store.connection() as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertNotIn('check_seconds', [row[1] for row in connection.execute('PRAGMA table_info(settings)')])
+        upgraded = Store(self.root)
+        self.assertEqual(upgraded.config(), before)
+        self.assertEqual(upgraded.hwids(), identities)
+        self.assertEqual(upgraded.credential('subscription_token'), token)
+        changed = upgraded.config(); changed['check_seconds'] = 900
+        upgraded.save_config(changed)
+        self.assertEqual(Store(self.root).config()['check_seconds'], 900)
+
     def version_one(self):
         self.legacy()
         store = Store(self.root)
@@ -184,6 +213,7 @@ class StorageTests(unittest.TestCase):
             connection.execute("INSERT INTO credentials VALUES ('admin_token', 'original-admin-key')")
             connection.execute('DROP TABLE new_credentials')
             connection.execute('ALTER TABLE hwids DROP COLUMN revision')
+            connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
             connection.execute('PRAGMA user_version = 1')
         return store
 
@@ -198,7 +228,7 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(store.credential('subscription_token'), 'original-link-key')
         with store.connection() as connection:
             self.assertEqual([tuple(row) for row in connection.execute('SELECT id, name, value FROM hwids ORDER BY id')], hwids)
-            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 3)
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 4)
             self.assertEqual([row[0] for row in connection.execute('SELECT name FROM credentials')], ['subscription_token'])
             self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone()[0], 'ok')
         for path, data in cookie_files.items():
@@ -242,6 +272,7 @@ class StorageTests(unittest.TestCase):
         original=store.config()
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE hwids DROP COLUMN revision')
+            connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
             connection.execute('PRAGMA user_version = 2')
         with common.process_lock(store.directory/'app.lock'):
             with self.assertRaisesRegex(common.SubscriptionError,'already running'):
@@ -260,6 +291,7 @@ class StorageTests(unittest.TestCase):
         before=store.config()
         with store.connection(write=True) as connection:
             connection.execute('ALTER TABLE hwids DROP COLUMN revision')
+            connection.execute('ALTER TABLE settings DROP COLUMN check_seconds')
             connection.execute('PRAGMA user_version = 2')
         connect=sqlite3.connect
         class FailingConnection(sqlite3.Connection):
