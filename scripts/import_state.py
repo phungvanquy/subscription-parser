@@ -34,7 +34,7 @@ def import_state(source: Path, destination: Path, uid=10001, gid=10001):
         try:
             connection = sqlite3.connect(database.as_uri() + '?mode=ro', uri=True)
             try:
-                if connection.execute('PRAGMA user_version').fetchone()[0] not in {1, 2, 3, 4, SCHEMA_VERSION}:
+                if connection.execute('PRAGMA user_version').fetchone()[0] not in {1, 2, 3, 4, 5, SCHEMA_VERSION}:
                     raise common.SubscriptionError('unsupported backup database version')
                 if connection.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or connection.execute('PRAGMA foreign_key_check').fetchall():
                     raise common.SubscriptionError('backup database is inconsistent')

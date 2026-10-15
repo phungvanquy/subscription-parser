@@ -2,13 +2,13 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-import hashlib
-import hmac
 import os
 from pathlib import Path
 import threading
-import time
 from typing import Literal
+from urllib.parse import urlsplit
+
+from starlette.concurrency import run_in_threadpool
 
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.exceptions import RequestValidationError
@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from . import common, publication
 from .config import admin_key
+from .auth import Auth, AuthError, SESSION_SECONDS
 from .fetch import fetch_subscription
 from .service import Manager, Busy
 
@@ -26,6 +27,11 @@ STATIC = Path(__file__).with_name("static")
 
 class Login(BaseModel):
     token: str = Field(min_length=1, max_length=256)
+    code: str = Field(default='', max_length=80)
+
+
+class Verification(BaseModel):
+    code: str = Field(min_length=1, max_length=80)
 
 
 class Provider(BaseModel):
@@ -78,7 +84,7 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
         if legacy.get('PARSER_PUBLIC_URL') and not public_url:
             raise common.SubscriptionError('set PARSER_PUBLIC_URL in deployment configuration before migrating')
     manager = Manager(root, fetcher, checker)
-    attempts, attempt_lock = {}, threading.Lock()
+    auth = Auth(manager.store, admin_token)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -99,20 +105,27 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
 
     app = FastAPI(title="subscription_parser", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.manager = manager
+    app.state.auth = auth
 
-    def secret():
-        return admin_token
+    def session_cookie(request):
+        return request.cookies.get('parser_session', '')
 
     def session_valid(request):
-        bearer = request.headers.get("authorization", "")
-        if bearer.startswith("Bearer ") and hmac.compare_digest(bearer[7:].encode(), secret().encode()):
-            return True
-        value = request.cookies.get("parser_session", "")
-        stamp, _, signature = value.partition(".")
-        if not stamp.isdigit() or not 0 <= time.time() - int(stamp) < 28800:
-            return False
-        expected = hmac.new(secret().encode(), stamp.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(signature.encode(), expected.encode())
+        return auth.valid_session(session_cookie(request))
+
+    def session_response(request, data, cookie):
+        response = JSONResponse(data)
+        if cookie:
+            response.set_cookie('parser_session', cookie, httponly=True,
+                                secure=request.url.scheme == 'https' or public_url.startswith('https://'),
+                                samesite='strict', max_age=SESSION_SECONDS)
+        return response
+
+    def auth_error_response(error):
+        if error.status in {401, 403, 429}:
+            manager.logs.write('auth_limited' if error.status == 429 else 'auth_failed')
+        headers = {'Retry-After': str(error.retry_after)} if error.retry_after else {}
+        return JSONResponse({'detail': error.detail}, status_code=error.status, headers=headers)
 
     def admin(request: Request):
         if not session_valid(request):
@@ -120,6 +133,17 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
 
     @app.middleware("http")
     async def boundaries(request, call_next):
+        # Count even malformed authentication requests, before body validation.
+        # SQLite work stays off the event loop. Forwarded IPs are accepted only
+        # through Uvicorn's configured trusted proxies.
+        if request.method == 'POST' and (request.url.path.rstrip('/') == '/api/login' or
+                                        request.url.path.startswith('/api/security/')):
+            try:
+                await run_in_threadpool(auth.limit_request, request.client.host if request.client else 'unknown')
+            except AuthError as error:
+                response = auth_error_response(error)
+                response.headers['Cache-Control'] = 'no-store'
+                return response
         try:
             if int(request.headers.get("content-length", "0")) > 16384:
                 return JSONResponse({"detail": "request too large"}, status_code=413)
@@ -155,6 +179,10 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
     async def invalid_request(request, exc):
         return JSONResponse({"detail": "invalid request fields; check names, URLs and limits"}, status_code=422)
 
+    @app.exception_handler(AuthError)
+    async def auth_error(request, exc):
+        return auth_error_response(exc)
+
     @app.get("/health")
     def health():
         return {"status": "ok"}
@@ -165,31 +193,45 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
 
     @app.post("/api/login")
     def login(body: Login, request: Request):
-        client = request.client.host if request.client else "unknown"
-        now = time.time()
-        with attempt_lock:
-            for key in list(attempts):
-                attempts[key] = [stamp for stamp in attempts[key] if now - stamp < 300]
-                if not attempts[key]:
-                    del attempts[key]
-            if len(attempts.get(client, [])) >= 10:
-                raise HTTPException(429, "too many attempts; try again in five minutes")
-            if not hmac.compare_digest(body.token.encode(), secret().encode()):
-                attempts.setdefault(client, []).append(now)
-                raise HTTPException(401, "incorrect admin key")
-            attempts.pop(client, None)
-        stamp = str(int(now))
-        signature = hmac.new(secret().encode(), stamp.encode(), hashlib.sha256).hexdigest()
-        response = JSONResponse({"authenticated": True})
-        response.set_cookie("parser_session", stamp + "." + signature, httponly=True,
-                            secure=request.url.scheme == "https", samesite="strict", max_age=28800)
-        return response
+        data, cookie = auth.login(body.token, body.code)
+        if cookie:
+            auth.logout(session_cookie(request))
+            manager.logs.write('auth_recovery_used' if data['recovery_used'] else 'auth_login')
+        return session_response(request, data, cookie)
 
     @app.post("/api/logout")
-    def logout():
+    def logout(request: Request):
+        auth.logout(session_cookie(request))
         response = JSONResponse({"authenticated": False})
         response.delete_cookie("parser_session")
         return response
+
+    @app.get('/api/security', dependencies=[Depends(admin)])
+    def security():
+        return auth.status()
+
+    @app.post('/api/security/2fa/setup', dependencies=[Depends(admin)])
+    def setup_two_factor(body: Login, request: Request):
+        account = urlsplit(public_url).hostname or 'admin'
+        return auth.begin_setup(session_cookie(request), body.token, account)
+
+    @app.post('/api/security/2fa/confirm', dependencies=[Depends(admin)])
+    def confirm_two_factor(body: Verification, request: Request):
+        data, cookie = auth.confirm_setup(session_cookie(request), body.code)
+        manager.logs.write('auth_enabled')
+        return session_response(request, data, cookie)
+
+    @app.post('/api/security/2fa/disable', dependencies=[Depends(admin)])
+    def disable_two_factor(body: Login, request: Request):
+        data, cookie = auth.change_factor(session_cookie(request), body.token, body.code, disable=True)
+        manager.logs.write('auth_disabled')
+        return session_response(request, data, cookie)
+
+    @app.post('/api/security/2fa/recovery', dependencies=[Depends(admin)])
+    def replace_recovery_codes(body: Login, request: Request):
+        data, cookie = auth.change_factor(session_cookie(request), body.token, body.code)
+        manager.logs.write('auth_recovery')
+        return session_response(request, data, cookie)
 
     @app.get("/api/state", dependencies=[Depends(admin)])
     def state(request: Request):

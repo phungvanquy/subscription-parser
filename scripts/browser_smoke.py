@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+import pyotp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn
@@ -411,9 +412,113 @@ def main():
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
                 page.locator('[data-close=hwid-dialog]').first.click()
                 checks.append('desktop and mobile layout, navigation and dialogs')
+
+                # Advance only the synthetic authentication clock, without
+                # sleeping or touching real devices / production enrollment.
+                auth_time = [time.time()]
+                app.state.auth.clock = lambda: auth_time[0]
+                page.set_viewport_size({'width':1440, 'height':1000})
+                page.locator('.nav-item[data-page=settings]').click()
+                expect(page.locator('#two-factor-status')).to_have_text('Not enabled')
+                page.locator('#setup-two-factor').click()
+                page.locator('#security-key').fill('wrong-key')
+                page.locator('#security-submit').click()
+                expect(page.locator('#security-dialog-error')).to_contain_text('incorrect admin key')
+                page.locator('#security-key').fill(admin)
+                page.locator('#security-submit').click()
+                expect(page.locator('#security-enrollment')).to_be_visible()
+                seed = page.locator('#security-secret').input_value()
+                expect(page.locator('#security-key')).to_have_value('')
+                assert page.locator('#security-qr').evaluate('img => img.complete && img.naturalWidth > 0')
+                for width in (320, 390, 768, 1440):
+                    page.set_viewport_size({'width':width, 'height':1000})
+                    assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/auth-setup-desktop.png',full_page=True)
+                code = pyotp.TOTP(seed).at(auth_time[0])
+                page.locator('#security-confirm-code').fill('000000' if code != '000000' else '111111')
+                page.locator('#security-submit').click()
+                expect(page.locator('#security-dialog-error')).to_contain_text('incorrect verification code')
+                page.locator('#security-confirm-code').fill(code)
+                page.locator('#security-submit').click()
+                expect(page.locator('#recovery-dialog')).to_be_visible()
+                recovery = page.locator('#recovery-codes').inner_text().splitlines()
+                assert len(recovery) == 10
+                expect(page.locator('#security-secret')).to_have_value('')
+                page.locator('#copy-recovery').click()
+                assert page.evaluate('navigator.clipboard.readText()') == '\n'.join(recovery)
+                for width in (320, 390, 1440):
+                    page.set_viewport_size({'width':width, 'height':1000})
+                    assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                page.locator('[data-close=recovery-dialog]').click()
+                expect(page.locator('#recovery-codes')).to_have_text('')
+                expect(page.locator('#two-factor-status')).to_have_text('Enabled')
+                expect(page.locator('#security-reminder')).not_to_be_visible()
+                checks.append('2FA setup verifies the key and code, renders a local QR and shows recovery codes once')
+
+                page.locator('#logout-button').click()
+                page.locator('#admin-key').fill(admin)
+                page.locator('#login-submit').click()
+                expect(page.locator('#login-factor')).to_be_visible()
+                expect(page.locator('#workspace')).not_to_be_visible()
+                page.locator('#login-code').fill(code)
+                page.locator('#login-submit').click()
+                expect(page.locator('#login-error')).to_contain_text('incorrect')
+                auth_time[0] += 30
+                page.locator('#login-code').fill(pyotp.TOTP(seed).at(auth_time[0]))
+                page.locator('#login-submit').click()
+                expect(page.locator('#workspace')).to_be_visible()
+                expect(page.locator('#login-code')).to_have_value('')
+                checks.append('two-step login requires a fresh authenticator code and rejects replay')
+
+                auth_time[0] += 301
+                page.locator('#replace-recovery').click()
+                page.locator('#security-key').fill(admin)
+                page.locator('#security-code').fill(pyotp.TOTP(seed).at(auth_time[0]))
+                page.locator('#security-submit').click()
+                expect(page.locator('#recovery-dialog')).to_be_visible()
+                replacement_codes = page.locator('#recovery-codes').inner_text().splitlines()
+                assert set(recovery).isdisjoint(replacement_codes)
+                page.locator('[data-close=recovery-dialog]').click()
+                page.locator('#logout-button').click()
+                page.locator('#admin-key').fill(admin)
+                page.locator('#login-submit').click()
+                expect(page.locator('#login-factor')).to_be_visible()
+                page.locator('#login-code').fill(replacement_codes[0])
+                page.locator('#login-submit').click()
+                expect(page.locator('#workspace')).to_be_visible()
+                expect(page.locator('#two-factor-description')).to_contain_text('9 recovery codes remaining')
+                checks.append('recovery replacement and one-use recovery login work through the dashboard')
+                for width in (320, 390, 768, 1440):
+                    page.set_viewport_size({'width':width, 'height':1000})
+                    assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                    if os.environ.get('PARSER_TEST_SCREENSHOTS') and width in (390, 1440):
+                        page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+f'/security-{width}.png',full_page=True)
+
+                page.locator('#disable-two-factor').click()
+                page.locator('#security-key').fill(admin)
+                page.locator('#security-code').fill('bad-code')
+                page.locator('#security-submit').click()
+                expect(page.locator('#security-dialog-error')).to_contain_text('incorrect')
+                page.locator('#security-code').fill(replacement_codes[1])
+                page.locator('#security-submit').click()
+                expect(page.locator('#security-dialog')).not_to_be_visible()
+                expect(page.locator('#two-factor-status')).to_have_text('Not enabled')
+                checks.append('disabling 2FA requires both factors and updates account security status')
+
                 page.locator('#logout-button').click()
                 expect(page.locator('#login-view')).to_be_visible()
                 checks.append('sign out')
+                auth_time[0] += 301
+                page.locator('#admin-key').fill('wrong-key')
+                for _ in range(10):
+                    with page.expect_response('**/api/login') as response:
+                        page.locator('#login-submit').click()
+                    assert response.value.status == 401
+                page.locator('#login-submit').click()
+                expect(page.locator('#login-error')).to_contain_text('too many authentication attempts')
+                expect(page.locator('#login-error')).to_contain_text('seconds')
+                checks.append('login throttling shows a clear retry time without opening the dashboard')
                 assert not errors, errors
                 browser.close()
         finally:

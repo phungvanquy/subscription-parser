@@ -1,3 +1,5 @@
 fastapi==0.143.1
 uvicorn==0.54.0
 PyYAML==6.0.3
+pyotp==2.10.0
+qrcode==8.2

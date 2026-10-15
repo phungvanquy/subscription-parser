@@ -26,6 +26,7 @@ document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.datase
 const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let state=null,page='overview',toastTimer,pollTimer;
 let logRequest=0,selectedSubscription='default',subscriptionWorking=false;
+let securityAction='setup',securityWorking=false,securityRequest=0;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
 const titles={
   overview:['YOUR WORKSPACE','Overview','Your providers, connection checks and subscriptions at a glance.','Overview'],
@@ -34,7 +35,7 @@ const titles={
   exports:['YOUR SUBSCRIPTIONS','Subscriptions','Choose providers. Copy a link. Keep your clients up to date.','Subscription links'],
   activity:['WORKSPACE HISTORY','Activity & logs','Recent refreshes, connection checks and debug messages.','Activity & logs'],
   devices:['PROVIDER ACCESS','Devices','Manage saved device IDs and see which providers use them.','Devices'],
-  settings:['WORKSPACE SETTINGS','Settings','Set the schedule for provider refreshes and connection checks.','Settings']
+  settings:['WORKSPACE SETTINGS','Settings','Manage account security, provider refreshes and connection checks.','Settings']
 };
 function setHTML(id,html){const el=$(id);if(el.innerHTML!==html)el.innerHTML=html;}
 
@@ -43,7 +44,7 @@ function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTi
 function relative(value){if(!value)return 'Never';const seconds=Math.max(0,(Date.now()-new Date(value).getTime())/1000);if(seconds<60)return 'Just now';if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;return new Date(value).toLocaleDateString();}
 function date(value){return value?new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
 function interval(value){return value===3600?'Hourly':value>=3600?`${value/3600} hours`:`${value/60} min`;}
-function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;state=null;}
+function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;securityRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;$('login-factor').hidden=true;$('login-code').required=false;$('login-code').value='';$('admin-key').value='';state=null;}
 function selectPage(name){
   page=name;
   document.querySelectorAll('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.page===name);if(b.dataset.page===name)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
@@ -57,6 +58,7 @@ function selectPage(name){
   $('subscriptions-layout').classList.remove('show-detail');$('subscription-menu').open=false;
   window.scrollTo({top:0,behavior:'instant'});
   if(name==='activity')loadLogs();
+  if(name==='settings')loadSecurity();
 }
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>selectPage(b.dataset.page)));
 async function loadLogs(){
@@ -80,7 +82,7 @@ async function loadLogs(){
 }
 $('refresh-logs').addEventListener('click',loadLogs);
 $('log-level').addEventListener('change',loadLogs);
-async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad)selectPage(page);pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
+async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
 function render(){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
   $('nav-provider-count').textContent=providers.length;$('provider-total').textContent=providers.length;
@@ -338,6 +340,7 @@ function renderDevices(){
 function clearReveal(){clearTimeout(revealTimer);$('device-revealed-value').value='';$('device-reveal-dialog').close();}
 function clearPrivateDialogs(){
   clearReveal();document.querySelectorAll('dialog[open]').forEach(dialog=>dialog.close());
+  clearSecuritySecrets();$('recovery-codes').textContent='';
   ['hwid-value','device-replacement-value','provider-url'].forEach(id=>$(id).value='');
   testRuns.clear();savedRuns.clear();
 }
@@ -387,6 +390,70 @@ async function copy(text){if(navigator.clipboard&&window.isSecureContext){await 
 $('export-cards').addEventListener('click',async event=>{const button=event.target.closest('[data-copy]');if(!button)return;try{await copy(currentSubscription().links[button.dataset.copy]);toast('Subscription link copied');}catch(error){toast(error.message);}});
 $('rotate-links').addEventListener('click',async()=>{const subscription=currentSubscription();$('subscription-menu').open=false;if(!subscription||!confirm(`Rotate links for “${subscription.name}”? Only its existing links will stop working.`))return;try{await api('/subscriptions/'+encodeURIComponent(subscription.id)+'/rotate-link',{method:'POST'});await loadState();toast('New subscription links are ready');}catch(error){toast(error.message);}});
 $('schedule-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({refresh_seconds:Number($('refresh-interval').value)})});await loadState();toast('Refresh schedule saved');}catch(error){toast(error.message);}});
-$('login-form').addEventListener('submit',async event=>{event.preventDefault();$('login-error').textContent='';try{await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value})});$('admin-key').value='';await loadState();if(page==='activity')loadLogs();}catch(error){$('login-error').textContent=error.message;}});
-$('logout-button').addEventListener('click',async()=>{await api('/logout',{method:'POST'});showLogin();});
+$('login-form').addEventListener('submit',async event=>{
+  event.preventDefault();$('login-error').textContent='';$('login-submit').disabled=true;
+  try{
+    const result=await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value,code:$('login-code').value.trim()})});
+    if(result.requires_two_factor){$('login-factor').hidden=false;$('login-code').required=true;$('login-code').focus();return;}
+    $('admin-key').value='';$('login-code').value='';await loadState();if(page==='activity')loadLogs();
+    if(result.recovery_used){selectPage('settings');toast('Recovery code used. Check your remaining codes in Account security.');}
+  }catch(error){$('login-error').textContent=error.message;}
+  finally{$('login-submit').disabled=false;}
+});
+$('logout-button').addEventListener('click',async()=>{try{await api('/logout',{method:'POST'});showLogin();}catch(error){toast(error.message);}});
+
+async function loadSecurity(){
+  if(!state)return;const request=++securityRequest;$('security-error').textContent='';
+  try{
+    const security=await api('/security');if(request!==securityRequest||!state)return;
+    $('two-factor-status').textContent=security.enabled?'Enabled':'Not enabled';
+    $('two-factor-status').className='status-pill'+(security.enabled?'':' unavailable');
+    $('two-factor-description').textContent=security.enabled?`Your admin key and an authenticator code are required to sign in. ${security.recovery_codes_remaining} recovery codes remaining.`:'Add a time-based authenticator such as Google Authenticator, Aegis or 2FAS. You will confirm a code before protection is enabled.';
+    $('security-reminder').hidden=security.enabled;
+    $('setup-two-factor').hidden=security.enabled;$('setup-two-factor').disabled=false;
+    $('replace-recovery').hidden=!security.enabled;$('disable-two-factor').hidden=!security.enabled;
+  }catch(error){if(request===securityRequest&&state)$('security-error').textContent=error.message;}
+}
+function clearSecuritySecrets(){
+  ['security-key','security-code','security-secret','security-confirm-code'].forEach(id=>$(id).value='');
+  $('security-qr').removeAttribute('src');
+}
+function openSecurity(action){
+  securityAction=action;clearSecuritySecrets();$('security-form').reset();$('security-dialog-error').textContent='';
+  $('security-credentials').hidden=false;$('security-enrollment').hidden=true;
+  $('security-key').required=true;$('security-confirm-code').required=false;
+  $('security-factor').hidden=action==='setup';$('security-code').required=action!=='setup';
+  $('security-dialog-title').textContent=action==='setup'?'Set up authenticator':action==='disable'?'Disable two-factor?':'Replace recovery codes';
+  $('security-dialog-description').textContent=action==='setup'?'Confirm your admin key, then scan the QR code with your authenticator.':action==='disable'?'Your admin key will be the only factor needed to sign in. Confirm both factors to continue. Other sessions will be signed out.':'Your old recovery codes will stop working. Confirm both factors to create a new set and sign out other sessions.';
+  $('security-submit').textContent=action==='setup'?'Continue':action==='disable'?'Disable two-factor':'Create new codes';
+  $('security-dialog').showModal();$('security-key').focus();
+}
+$('setup-two-factor').addEventListener('click',()=>openSecurity('setup'));
+$('replace-recovery').addEventListener('click',()=>openSecurity('recovery'));
+$('disable-two-factor').addEventListener('click',()=>openSecurity('disable'));
+$('security-dialog').addEventListener('close',clearSecuritySecrets);
+$('security-secret').addEventListener('click',event=>event.target.select());
+$('security-dialog').addEventListener('cancel',event=>{if(securityWorking)event.preventDefault();});
+$('recovery-dialog').addEventListener('close',()=>$('recovery-codes').textContent='');
+$('copy-recovery').addEventListener('click',async()=>{try{await copy($('recovery-codes').textContent);toast('Recovery codes copied. Store them somewhere safe.');}catch(error){toast(error.message);}});
+$('security-form').addEventListener('submit',async event=>{
+  event.preventDefault();if(securityWorking)return;securityWorking=true;$('security-dialog-error').textContent='';
+  const button=$('security-submit'),label=button.textContent;
+  $('security-form').querySelectorAll('button').forEach(b=>b.disabled=true);button.textContent='Verifying…';
+  try{
+    const body=securityAction==='confirm'?{code:$('security-confirm-code').value}:{token:$('security-key').value,code:$('security-code').value.trim()};
+    const result=await api('/security/2fa/'+securityAction,{method:'POST',body:JSON.stringify(body)});
+    if(securityAction==='setup'){
+      $('security-key').value='';$('security-key').required=false;$('security-credentials').hidden=true;
+      $('security-secret').value=result.secret;$('security-qr').src=result.qr;$('security-enrollment').hidden=false;
+      $('security-confirm-code').required=true;$('security-dialog-description').textContent='Scan the code, then enter the 6-digit code from your app to enable protection.';
+      securityAction='confirm';$('security-confirm-code').focus();
+    }else{
+      $('security-dialog').close();await loadSecurity();
+      if(result.recovery_codes){$('recovery-codes').textContent=result.recovery_codes.join('\n');$('recovery-dialog').showModal();}
+      else toast('Two-factor authentication disabled. Other sessions have been signed out.');
+    }
+  }catch(error){$('security-dialog-error').textContent=error.message;}
+  finally{securityWorking=false;$('security-form').querySelectorAll('button').forEach(b=>b.disabled=false);button.textContent=securityAction==='confirm'?'Enable two-factor':label;}
+});
 (async()=>{try{const session=await api('/session');if(session.authenticated)await loadState();else showLogin();}catch{showLogin();$('login-error').textContent='Unable to reach the server. Please try again.';}})();

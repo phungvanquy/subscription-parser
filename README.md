@@ -291,12 +291,72 @@ settings and device revision. Failed/expired tests cannot silently save differen
 settings. Existing direct API writes without a test token remain supported;
 the dashboard requires testing when fetch settings change.
 
+### Two-factor authentication and login protection
+
+Open **Settings → Account security → Set up authenticator**. Confirm your admin
+key, scan the QR code using a TOTP authenticator, then enter a 6-digit code.
+Alternatively, enter the setup key manually using time-based, 6-digit codes.
+The QR code is generated locally; no third-party QR service receives the secret.
+Setup expires after ten minutes and is bound to the browser session that started
+it. Protection becomes active only after a valid code, so abandoned setup does
+not lock you out. Save the ten recovery codes shown after enrollment somewhere
+safe, separate from your admin key. They are shown once and stored only as hashes.
+
+Once enabled, login requires the admin key **and** an authenticator code or one
+unused recovery code. Codes use 30-second steps with one step of clock tolerance;
+accepted codes cannot be replayed. If you just used a code, wait for the next one.
+Keep the server and phone clocks synchronized. Replacing recovery codes or
+disabling two-factor authentication requires both factors again. Recovery login
+and security changes revoke previous sessions. All MFA state stays in the private
+SQLite database in the volume; `.env` still contains only deployment configuration
+and the admin key. Rotating that key does not remove your authenticator.
+
+Authentication endpoints allow **10 requests per client in 5 minutes**, including
+malformed requests and successful requests. They also share a limit of **100
+requests in 5 minutes**, plus **10 second-factor attempts in 5 minutes** for the
+admin account after key verification. IPv6 addresses in the same /64 share a
+client limit. Counters persist across restarts, expire automatically and have
+bounded storage. HTTP 429 includes `Retry-After` in seconds; blocked requests do
+not extend the wait. These limits do not stop subscription downloads, health
+checks or already authenticated dashboard reads. Configure trusted proxies
+accurately: the app uses Uvicorn's trusted client address, never raw forwarded
+headers supplied directly to the application.
+
+Sessions are random, stored as hashes, expire after eight hours, and are revoked
+server-side at logout. At most 20 sessions remain active. Cookies are HttpOnly,
+SameSite=Strict, and Secure for HTTPS requests or when the public URL is HTTPS.
+The first upgrade to database version 6 signs out existing dashboard sessions;
+providers, HWIDs and subscription links are preserved. A bare
+`Authorization: Bearer <admin-key>` is **no longer accepted**, even before 2FA
+enrollment. API clients must `POST /api/login` with `{"token":"...","code":"..."}`
+and retain the returned session cookie. A response with `requires_two_factor`
+has not authenticated the client and does not issue a session. Never put these
+credentials in query strings or logs. Private subscription URLs continue to use
+their existing tokens without interactive login.
+
+If both the authenticator and recovery codes are lost, the server owner can reset
+2FA locally. This deliberately requires stopping the app and explicit confirmation;
+there is no HTTP reset endpoint:
+
+```sh
+docker compose stop app
+docker compose run --rm --no-deps app python -m subscription_parser.manage reset-two-factor --confirm
+docker compose up -d --wait
+```
+
+This revokes all sessions and recovery codes while preserving the admin key,
+providers and subscription links. Sign in and enroll an authenticator again.
+Authentication events appear in the existing bounded debug log, without keys,
+codes, seeds, cookies or client IPs. TOTP is based on
+[PyOTP's security guidance](https://pyauth.github.io/pyotp/) and
+[RFC 6238](https://www.rfc-editor.org/rfc/rfc6238.html).
+
 ### Configuration and data
 
 | Location | Contents |
 | --- | --- |
 | Checkout `.env` | Admin key, public URL, published port, bind address, trusted proxies and image selection. |
-| Volume `/data/app.sqlite3` | HWIDs, providers, subscriptions, tokens, provider selections and schedules. |
+| Volume `/data/app.sqlite3` | HWIDs, providers, subscriptions, tokens, provider selections, schedules, 2FA enrollment, hashed recovery codes, sessions and authentication counters. |
 | Volume `/data/.parser-state/` | Provider response cache, published snapshot, refresh history and process lock. |
 | Volume `/data/legacy-backup/` | Private copies of legacy files, created only when migrating an older installation. |
 
@@ -377,7 +437,8 @@ docker compose exec app python -m subscription_parser.manage admin-key
 Save that exact value as `PARSER_ADMIN_TOKEN` in the checkout's `.env`. Back up
 the data volume and stop the old app before deploying the new image. Startup
 transactionally upgrades the database to version 2 and removes its admin key;
-subscription tokens, records, caches and existing sessions are preserved. The
+subscription tokens, records and caches are preserved. The authentication upgrade
+to version 6 requires signing in again. The
 upgrade refuses to proceed without a configured admin key or while the old app
 holds its process lock.
 

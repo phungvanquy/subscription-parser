@@ -210,6 +210,8 @@ class StorageTests(unittest.TestCase):
     def downgrade_subscriptions(self, store):
         token = store.credential('subscription_token')
         with store.connection(write=True) as connection:
+            for table in ('auth_settings', 'auth_sessions', 'auth_recovery', 'auth_limits'):
+                connection.execute('DROP TABLE ' + table)
             connection.execute(CREDENTIALS_SCHEMA)
             connection.execute('INSERT INTO credentials VALUES (?, ?)', ('subscription_token', token))
             connection.execute('DROP TABLE subscription_providers')

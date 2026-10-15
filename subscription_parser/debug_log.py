@@ -37,6 +37,14 @@ EVENTS = {
     'checks_completed': ('info', 'Server connection checks completed'),
     'request_failed': ('error', 'Application request failed'),
     'scheduler_failed': ('error', 'Background scheduler encountered an error'),
+    'auth_login': ('info', 'Admin signed in'),
+    'auth_failed': ('warning', 'Authentication verification failed'),
+    'auth_limited': ('warning', 'Authentication rate limit reached'),
+    'auth_enabled': ('info', 'Two-factor authentication enabled; previous sessions revoked'),
+    'auth_disabled': ('warning', 'Two-factor authentication disabled; previous sessions revoked'),
+    'auth_recovery': ('info', 'Recovery codes replaced; previous sessions revoked'),
+    'auth_recovery_used': ('warning', 'Admin signed in with a recovery code; previous sessions revoked'),
+    'auth_reset': ('warning', 'Two-factor authentication reset by local server administrator'),
 }
 CHOICES = {
     'operation': {'refresh', 'connection check', 'configuration update', 'provider test'},

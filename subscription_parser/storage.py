@@ -13,8 +13,9 @@ from urllib.parse import urlsplit
 
 from . import common
 from .config import admin_key
+from .auth import AUTH_SCHEMA
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 CREDENTIALS_SCHEMA = """CREATE TABLE credentials (
     name TEXT PRIMARY KEY CHECK(name = 'subscription_token'),
     value TEXT NOT NULL CHECK(length(value) > 0)
@@ -54,7 +55,7 @@ CREATE TABLE settings (
     refresh_seconds INTEGER NOT NULL CHECK(refresh_seconds BETWEEN 300 AND 86400),
     check_seconds INTEGER NOT NULL DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)
 );
-"""
+""" + AUTH_SCHEMA
 PROVIDER_INSERT = 'INSERT INTO providers VALUES (?, ?, ?, ?, ?, ?, ?)'
 
 
@@ -106,6 +107,8 @@ class Store:
                 self._migrate_connectivity()
             if version in {1, 2, 3, 4}:
                 self._migrate_subscriptions()
+            if version in {1, 2, 3, 4, 5}:
+                self._migrate_auth()
             with self.connection() as connection:
                 if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
                     raise common.SubscriptionError('unsupported application database version')
@@ -113,6 +116,8 @@ class Store:
                     raise common.SubscriptionError('application credentials are missing; restore a backup')
                 if connection.execute('SELECT count(*) FROM settings').fetchone()[0] != 1:
                     raise common.SubscriptionError('application settings are missing; restore a backup')
+                if connection.execute('SELECT count(*) FROM auth_settings').fetchone()[0] != 1:
+                    raise common.SubscriptionError('authentication settings are missing; restore a backup')
         except sqlite3.DatabaseError:
             raise common.SubscriptionError('application database could not be read; restore a backup') from None
 
@@ -209,6 +214,18 @@ class Store:
         if config_path.exists():
             sources['.parser-state/providers.json'] = hashlib.sha256(config_path.read_bytes()).hexdigest()
         return env, hwids, config, sources
+
+    def _migrate_auth(self):
+        with common.process_lock(self.directory / 'app.lock'):
+            with self.connection(write=True) as connection:
+                if connection.execute('PRAGMA user_version').fetchone()[0] != 5:
+                    return
+                # executescript commits implicitly: execute individual statements
+                # so a failed migration rolls back both tables and schema version.
+                for statement in AUTH_SCHEMA.split(';'):
+                    if statement.strip():
+                        connection.execute(statement)
+                connection.execute('PRAGMA user_version = 6')
 
     def _initialize(self):
         env, hwids, config, sources = self._legacy_inputs()

@@ -43,9 +43,11 @@ def main():
     environment['PARSER_ADMIN_TOKEN'] = admin
     subscription = 'docker-smoke-subscription-key'
     checks = []
+    session_cookie = ''
 
     def api(path, method='GET', body=None, proxy=False):
-        headers = {'Authorization': 'Bearer ' + admin}
+        nonlocal session_cookie
+        headers = {'Cookie': session_cookie} if session_cookie else {}
         if body is not None:
             headers['Content-Type'] = 'application/json'
         if proxy:
@@ -53,6 +55,8 @@ def main():
         request = urllib.request.Request(base + path, method=method, headers=headers,
             data=None if body is None else json.dumps(body).encode())
         with urllib.request.urlopen(request, timeout=10) as response:
+            if response.headers.get('Set-Cookie'):
+                session_cookie = response.headers['Set-Cookie'].split(';', 1)[0]
             return json.load(response)
 
     def wait_for_refresh():
@@ -91,6 +95,7 @@ def main():
                 data=(ROOT / 'scripts/connectivity_fixture.py').read_bytes())
         compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '60')
         assert api('/healthz') == {'status': 'ok'}
+        assert api('/api/login', 'POST', {'token': admin})['authenticated']
         state = wait_for_refresh()
         assert state['providers'][0]['status'] == 'cached'
         assert all(state['validation'][target]['status'] == 'passed' for target in ('hiddify', 'mihomo', 'xray'))
@@ -111,9 +116,18 @@ def main():
         scoped = next(item for item in api('/api/subscriptions') if item['id'] == scoped_id)
         assert scoped['counts']['v2board'] == 1 and scoped['links'] != state['links']
         scoped_link = scoped['links']['v2board.txt']
+        setup = api('/api/security/2fa/setup', 'POST', {'token': admin})
+        code = compose('exec', '-T', 'app', 'python', '-c',
+                       'import pyotp, sys; print(pyotp.TOTP(sys.stdin.read()).now())', data=setup['secret'].encode()).decode().strip()
+        recovery_codes = api('/api/security/2fa/confirm', 'POST', {'code': code})['recovery_codes']
+        assert api('/api/security')['enabled']
+        assert not api('/api/login', 'POST', {'token': admin})['authenticated']
+        checks.append('authenticator enrollment requires a valid code and then enforces the second factor')
         log_entry = api('/api/logs')['entries'][0]
         compose('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '60')
         state = wait_for_refresh()
+        assert api('/api/security')['enabled']
+        assert api('/api/security')['recovery_codes_remaining'] == 10
         assert state['links']['v2board.txt'] == new
         assert state['refresh_seconds'] == 600
         assert any(item['id'] == saved['id'] and item['name'] == 'Second device' and item['configured'] for item in state['hwids'])
@@ -153,7 +167,7 @@ assert all(path.stat().st_mode & 0o777 == 0o600 for path in Path('/data/logs').i
 store = Store(Path('/data'))
 with store.connection() as connection:
     assert connection.execute('SELECT count(*) FROM subscriptions').fetchone()[0] == 2
-    assert connection.execute('PRAGMA user_version').fetchone()[0] == 5
+    assert connection.execute('PRAGMA user_version').fetchone()[0] == 6
 identities = {item['name']: item['id'] for item in store.hwids()}
 assert store.hwid_value(identities['DEVICE_ID']) == 'docker-authorized-id'
 assert store.hwid_value(identities['Second device']) == 'docker-second-authorized-id'
@@ -167,7 +181,14 @@ print('passed')
         admin = 'changed-docker-smoke-admin-key'
         environment['PARSER_ADMIN_TOKEN'] = admin
         compose('up', '-d', '--no-build', '--wait', '--wait-timeout', '60')
-        assert api('/api/login', 'POST', {'token': admin})['authenticated']
+        try:
+            api('/api/state')
+            raise AssertionError('previous session remained valid after admin key change')
+        except urllib.error.HTTPError as error:
+            assert error.code == 401
+        assert api('/api/login', 'POST', {'token': admin, 'code': recovery_codes[0]})['authenticated']
+        assert api('/api/security')['enabled']
+        assert api('/api/security')['recovery_codes_remaining'] == 9
         try:
             api('/api/login', 'POST', {'token': previous_admin})
             raise AssertionError('previous admin key remained valid after configuration change')
@@ -176,6 +197,7 @@ print('passed')
         state = wait_for_refresh()
         assert state['links']['v2board.txt'] == new
         checks.append('admin key changes via deployment environment without changing subscription links')
+        checks.append('two-factor enrollment, hashed recovery codes and sessions persist across container replacement; key rotation revokes sessions without removing 2FA')
         print(json.dumps({'passed': len(checks), 'checks': checks}, indent=2))
     finally:
         compose('down', '--volumes', '--remove-orphans', '--timeout', '20')

@@ -303,3 +303,23 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
   .activity-row strong { font-size: 13px; }
   .activity-row p, .activity-row time { font-size: 11px; }
 }
+
+/* Account security and authenticator enrollment. */
+.security-panel { grid-column: 1 / -1; }
+.security-panel .settings-form h3 { margin: 0 0 8px; font-size: 16px; }
+.security-panel .settings-form > .hint { max-width: 680px; margin-top: 0; }
+.security-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+.security-protection { margin: 24px 0 0; border-top: 1px solid var(--line); padding-top: 18px; font-size: 13px; line-height: 1.7; color: var(--muted); }
+.security-reminder { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.security-reminder .text-button { text-align: left; white-space: normal; }
+#login-factor { margin-top: 18px; }
+#security-qr { display: block; width: 224px; max-width: 100%; height: auto; margin: 14px auto 22px; background: white; }
+#security-secret { font-family: monospace; font-size: 13px; letter-spacing: .3px; }
+#security-confirm-code { font-size: 22px; letter-spacing: 6px; }
+#recovery-codes { padding: 16px 12px; border: 1px solid var(--line); border-radius: 10px; background: #f5f8fa; font-size: 13px; line-height: 2; overflow-x: auto; user-select: all; }
+#recovery-dialog { max-width: calc(100% - 24px); }
+@media (max-width: 480px) {
+  .security-actions { flex-direction: column; align-items: stretch; }
+  #recovery-codes { font-size: 11px; padding: 10px 6px; }
+  #security-secret { font-size: 12px; padding-left: 8px; padding-right: 8px; }
+}
