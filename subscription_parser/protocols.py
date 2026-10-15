@@ -14,7 +14,7 @@ import re
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import yaml
-from . import common
+from . import common, hysteria
 from .xray_transports import hiddify_outbound
 
 Error = common.SubscriptionError
@@ -39,12 +39,19 @@ def enabled(value):
 
 
 def endpoint(node):
-    return common.host_port(node.get("server"), node.get("server_port"))
+    port = node.get("server_port")
+    if node.get("type") in {"hysteria", "hysteria2"} and node.get("server_ports"):
+        if port is not None:
+            raise Error("Hysteria requires either server_port or server_ports")
+        port = hysteria.ports(",".join(node["server_ports"]).replace(":", "-"))[0].split('-')[0]
+    return common.host_port(node.get("server"), port)
 
 
 def valid_native(node):
     host, port = endpoint(node)
-    node["server"], node["server_port"] = host, port
+    node["server"] = host
+    if not node.get("server_ports"):
+        node["server_port"] = port
     protocol = node.get("type")
     if protocol in {"vless", "vmess", "tuic"}:
         node["uuid"] = common.valid_uuid(node.get("uuid"))
@@ -205,15 +212,18 @@ def mihomo_to_native(raw, notes):
         for old, new in [("auth", "auth"), ("auth-str", "auth_str"), ("up", "up"), ("down", "down"), ("obfs", "obfs"),
                          ("recv-window-conn", "recv_window_conn"), ("recv-window", "recv_window"), ("disable-mtu-discovery", "disable_mtu_discovery")]:
             if old in data:
-                result[new] = data[old]
+                result[new] = str(mbps(data[old])) + " Mbps" if old in {"up", "down"} else data[old]
     if kind == "hysteria2":
         for key in ("up", "down"):
             if key in data:
                 result[key + "_mbps"] = mbps(data[key])
         if data.get("obfs"):
             result["obfs"] = {"type": data["obfs"], "password": data.get("obfs-password", "")}
+    if kind in {"hysteria", "hysteria2"}:
         if data.get("ports"):
-            result["server_ports"] = str(data["ports"]).replace("-", ":").split(",")
+            result["server_ports"] = [item.replace("-", ":") if '-' in item else item + ':' + item
+                                      for item in hysteria.ports(str(data["ports"]))]
+            result.pop("server_port", None)
         if data.get("hop-interval"):
             result["hop_interval"] = str(data["hop-interval"]) + "s"
     if kind == "tuic":
@@ -245,7 +255,8 @@ def native_to_mihomo(raw):
                 "auth", "auth_str", "up", "down", "up_mbps", "down_mbps", "obfs", "recv_window_conn", "recv_window",
                 "disable_mtu_discovery", "server_ports", "hop_interval", "congestion_control", "udp_relay_mode",
                 "zero_rtt_handshake", "heartbeat", "version"}, "Hiddify outbound")
-    result = {"type": {"shadowsocks": "ss", "socks": "socks5"}.get(kind, kind), "server": data["server"], "port": data["server_port"]}
+    host, port = endpoint(data)
+    result = {"type": {"shadowsocks": "ss", "socks": "socks5"}.get(kind, kind), "server": host, "port": port}
     for key in ("uuid", "flow", "password", "username"):
         if key in data:
             result[key] = data[key]
@@ -323,8 +334,9 @@ def native_to_mihomo(raw):
         if data.get("obfs"):
             only(data["obfs"], {"type", "password"}, "Hysteria2 obfuscation")
             result.update(obfs=data["obfs"]["type"], **{"obfs-password": data["obfs"].get("password", "")})
+    if kind in {"hysteria", "hysteria2"}:
         if data.get("server_ports"):
-            result["ports"] = ",".join(data["server_ports"]).replace(":", "-")
+            result["ports"] = ",".join(hysteria.ports(",".join(data["server_ports"]).replace(":", "-")))
         if data.get("hop_interval"):
             result["hop-interval"] = duration_ms(data["hop_interval"]) / 1000
     if kind == "tuic":
@@ -411,6 +423,9 @@ def native_to_xray(data):
 
 def uri_to_native(uri, notes):
     scheme = uri.partition("://")[0].lower()
+    if scheme in hysteria.SCHEMES:
+        proxy, label = hysteria.uri_to_mihomo(uri)
+        return mihomo_to_native(proxy, notes), label
     if scheme == "vmess":
         v = json.loads(b64(uri.split("://", 1)[1].split("#", 1)[0]))
         only(v, {"v", "ps", "add", "port", "id", "aid", "scy", "net", "type", "host", "path", "tls", "sni", "alpn", "fp"}, "VMess link")
@@ -488,29 +503,15 @@ def uri_to_native(uri, notes):
             if security == "reality":
                 tls["reality"] = {"enabled": True, "public_key": q.get("pbk", ""), "short_id": q.get("sid", "")}
             node["tls"] = tls
-    elif kind in {"hysteria", "hysteria2", "tuic"}:
-        only(q, {"auth", "peer", "sni", "insecure", "allowInsecure", "alpn", "obfs", "obfsParam", "obfs-password", "upmbps", "downmbps", "mport", "congestion_control", "udp_relay_mode", "zero_rtt_handshake", "protocol"}, "QUIC link")
+    elif kind == "tuic":
+        only(q, {"peer", "sni", "insecure", "allowInsecure", "alpn", "congestion_control", "udp_relay_mode", "zero_rtt_handshake"}, "TUIC link")
         node["tls"] = {"enabled": True, "server_name": q.get("sni") or q.get("peer") or parsed.hostname}
-        password = unquote(parsed.username or "") + ((":" + unquote(parsed.password)) if parsed.password is not None else "")
-        if kind == "hysteria":
-            if q.get("protocol", "udp") != "udp":
-                raise Error("Hysteria non-UDP carrier needs Mihomo native configuration")
-            node.update(auth_str=q.get("auth", password), up=q.get("upmbps", "10") + " Mbps", down=q.get("downmbps", "50") + " Mbps")
-            if q.get("obfs"):
-                node["obfs"] = q.get("obfsParam", q["obfs"])
-        elif kind == "hysteria2":
-            node["password"] = password
-            if q.get("obfs"):
-                node["obfs"] = {"type": q["obfs"], "password": q.get("obfs-password", "")}
-            if q.get("mport"):
-                node["server_ports"] = q["mport"].replace("-", ":").split(",")
-        else:
-            node.update(uuid=unquote(parsed.username or ""), password=unquote(parsed.password or ""))
-            for key in ("congestion_control", "udp_relay_mode"):
-                if q.get(key):
-                    node[key] = q[key]
-            if "zero_rtt_handshake" in q:
-                node["zero_rtt_handshake"] = enabled(q["zero_rtt_handshake"])
+        node.update(uuid=unquote(parsed.username or ""), password=unquote(parsed.password or ""))
+        for key in ("congestion_control", "udp_relay_mode"):
+            if q.get(key):
+                node[key] = q[key]
+        if "zero_rtt_handshake" in q:
+            node["zero_rtt_handshake"] = enabled(q["zero_rtt_handshake"])
     elif kind in {"socks", "http"}:
         only(q, set(), "proxy URL")
         if parsed.username:
@@ -541,7 +542,7 @@ class Entry:
 
 
 def adapt(kind, raw, source, label, context=None, group_size=1):
-    protocol = raw.get("protocol", raw.get("type", "unknown")) if isinstance(raw, dict) else raw.partition(":")[0]
+    protocol = raw.get("protocol" if kind == "xray" else "type", "unknown") if isinstance(raw, dict) else raw.partition(":")[0]
     if kind == "xray" and protocol == "hysteria" and raw.get("settings", {}).get("version") == 2:
         protocol = "hysteria2"
     entry = Entry(label[:200], source, protocol, kind, copy.deepcopy(raw), group_size, context or [])
@@ -574,7 +575,13 @@ def adapt(kind, raw, source, label, context=None, group_size=1):
         elif kind == "xray":
             native = xray_to_native(raw, entry.notes)
         else:
-            native, entry.name = uri_to_native(raw, entry.notes)
+            if raw.partition('://')[0].lower() in hysteria.SCHEMES:
+                proxy, entry.name = hysteria.uri_to_mihomo(raw)
+                entry.protocol = proxy['type']
+                entry.outputs['mihomo'] = proxy
+                native = mihomo_to_native(proxy, entry.notes)
+            else:
+                native, entry.name = uri_to_native(raw, entry.notes)
         entry.protocol = native["type"]
         entry.outputs["hiddify"] = native
     except (Error, ValueError, KeyError, TypeError, IndexError) as exc:
@@ -640,7 +647,7 @@ def parse(data: bytes, source: str, depth=0):
                 if not isinstance(raw, dict):
                     raise Error("proxy collection contains a non-object")
                 kind = "mihomo" if is_mihomo else "xray" if "protocol" in raw else "singbox"
-                protocol = raw.get("protocol", raw.get("type"))
+                protocol = raw.get("protocol" if kind == "xray" else "type")
                 if protocol in SKIP:
                     continue
                 if not protocol:

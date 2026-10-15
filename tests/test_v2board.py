@@ -18,8 +18,10 @@ def node(kind='vless'):
         result['password'] = 'pass:a&b#é'
     if kind == 'shadowsocks':
         result['method'] = 'aes-128-gcm'
-    if kind in {'trojan', 'hysteria2'}:
+    if kind in {'trojan', 'hysteria', 'hysteria2'}:
         result['tls'] = {'enabled': True, 'server_name': 'cover.example'}
+    if kind == 'hysteria':
+        result.update(auth_str='pass:a&b#é', up_mbps=20, down_mbps=100)
     return result
 
 
@@ -29,15 +31,17 @@ def entries(nodes):
 
 class V2BoardTests(unittest.TestCase):
     def test_supported_protocols_roundtrip_credentials(self):
-        result = v2board.export(entries([node(kind) for kind in ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria2']]))
-        self.assertEqual(result['count'], 4)
-        self.assertEqual(len(result['diagnostics']), 1)
-        self.assertEqual({line.split('://')[0] for line in result['body'].splitlines()}, {'vless', 'vmess', 'trojan', 'ss'})
+        result = v2board.export(entries([node(kind) for kind in ['vless', 'vmess', 'trojan', 'shadowsocks', 'hysteria', 'hysteria2']]))
+        self.assertEqual(result['count'], 6)
+        self.assertEqual(result['diagnostics'], [])
+        self.assertEqual({line.split('://')[0] for line in result['body'].splitlines()}, {'vless', 'vmess', 'trojan', 'ss', 'hysteria', 'hysteria2'})
         decoded = protocols.parse(result['body'].encode(), 'Roundtrip')
         for entry in decoded:
             native = entry.outputs['hiddify']
             if entry.protocol in {'vless', 'vmess'}:
                 self.assertEqual(native['uuid'], UUID)
+            elif entry.protocol == 'hysteria':
+                self.assertEqual(native['auth_str'], 'pass:a&b#é')
             else:
                 self.assertEqual(native['password'], 'pass:a&b#é')
 

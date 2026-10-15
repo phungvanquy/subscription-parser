@@ -61,7 +61,7 @@ are removed from published exports.
 | `/sub/<token>/hiddify.json` | Combined native Hiddify/sing-box outbounds. |
 | `/sub/<token>/mihomo.yaml` | Mihomo proxies, selection group and routing rule. Also usable as a proxy-provider feed. |
 | `/sub/<token>/xray.json` | Xray outbound configuration, including referenced dependencies. |
-| `/sub/<token>/v2board.txt` | Plain URI subscription for V2Board External Subscriptions: VLESS, VMess, Trojan and Shadowsocks. |
+| `/sub/<token>/v2board.txt` | Plain URI subscription for V2Board External Subscriptions: VLESS, VMess, Trojan, Shadowsocks, Hysteria v1 and Hysteria2. |
 | `/sub/<token>/combined.json` | Archive containing all three formats, server inventory and compatibility diagnostics. Not a universal client import format. |
 
 For V2Board, copy **V2Board → Copy link** and paste the HTTPS URL into
@@ -74,6 +74,21 @@ preserved in share links. Its limits match the importer: 500 entries, 1 MiB tota
 and 16 KiB per entry. Exclusions appear under **Compatibility notes → V2Board**.
 V2Board may retain advanced transport links for URI clients while omitting them
 from its structured Mihomo/sing-box exports. An empty feed returns HTTP 503.
+
+Hysteria exports preserve authentication (including Hysteria2 `user:password`),
+IPv6, TLS server name and verification, ALPN, supported obfuscation, bandwidth
+and port hopping. `hy2://` input is accepted and exported as `hysteria2://`.
+Hysteria v1 needs explicit upload/download bandwidth; Hysteria2 keeps its normal
+defaults when bandwidth is absent. Certificate-pinned Hysteria2 nodes are tested
+with Mihomo and retain `pinSHA256`; they are excluded from conversions without
+an equivalent certificate pin. Custom hopping intervals, dependency chains,
+binary authentication and other settings with no share-link equivalent remain
+excluded with a compatibility note. Only recently passing nodes are published.
+Xray's Hysteria2 `tlsSettings.fingerprint` is a ClientHello setting ignored by
+its QUIC transport; it is not converted into a certificate pin. Certificate
+verification fields remain subject to strict conversion checks.
+TUIC and AnyTLS remain excluded from this feed because V2Board's **External
+Subscriptions** importer does not accept them, even though its managed nodes do.
 
 ## Formats and protocol support
 
@@ -423,7 +438,10 @@ executable in the test environment.
 The bundled validators are Mihomo 1.19.32, Hiddify core 5.0.0 and Xray 26.3.27.
 Adapters follow the official [Mihomo protocol schemas](https://wiki.metacubex.one/en/config/proxies/),
 [sing-box outbound schemas](https://sing-box.sagernet.org/configuration/outbound/),
-[Xray Hysteria2 format](https://xtls.github.io/en/config/outbounds/hysteria.html)
+[Xray Hysteria2 format](https://xtls.github.io/en/config/outbounds/hysteria.html),
+[Xray's pinned Hysteria transport implementation](https://github.com/XTLS/Xray-core/blob/v26.3.27/transport/internet/hysteria/dialer.go),
+[Hysteria v1 share links](https://v1.hysteria.network/docs/uri-scheme/),
+[Hysteria2 share links](https://v2.hysteria.network/docs/developers/URI-Scheme/)
 and [Hiddify's import parser](https://github.com/hiddify/hiddify-core/blob/v5.0.0/v2/config/parser.go).
 
 ## Project layout

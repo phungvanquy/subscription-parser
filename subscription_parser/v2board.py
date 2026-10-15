@@ -8,13 +8,14 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
-from . import common, protocols
+from . import common, hysteria, protocols
 from .xray_transports import vless_link
 
 MAX_NODES = 500
 MAX_BYTES = 1048576
 MAX_ENTRY_BYTES = 16384
-SUPPORTED = {"vless", "vmess", "trojan", "shadowsocks", "ss"}
+SUPPORTED = {"vless", "vmess", "trojan", "shadowsocks", "ss", *hysteria.SCHEMES}
+UNSUPPORTED = "V2Board External Subscriptions accepts VLESS, VMess, Trojan, Shadowsocks, Hysteria and Hysteria2"
 DUMMY_UUID = "01234567-89ab-4cde-8fab-0123456789ab"
 Error = common.SubscriptionError
 
@@ -38,6 +39,10 @@ def endpoint(host, port):
 def normalize_uri(uri, label):
     """Preserve connection parameters while meeting the importer's strict syntax."""
     scheme = uri.partition('://')[0]
+    if scheme.lower() in hysteria.SCHEMES:
+        _, host, port, _, _, _ = hysteria.parse_uri(uri)
+        endpoint(host, port)
+        return hysteria.normalize_uri(uri, label)
     if scheme == 'vmess':
         data = json.loads(protocols.b64(uri[8:].split('#', 1)[0]))
         if not isinstance(data, dict) or any(isinstance(value, (dict, list)) for value in data.values()):
@@ -49,7 +54,7 @@ def normalize_uri(uri, label):
     if scheme == 'ss' and '@' not in uri.split('#', 1)[0]:
         uri = 'ss://' + protocols.b64(uri[5:].split('#', 1)[0])
     if scheme not in {'vless', 'trojan', 'ss'}:
-        raise Error("V2Board supports only VLESS, VMess, Trojan and Shadowsocks")
+        raise Error(UNSUPPORTED)
     parsed = urlsplit(uri)
     host, port = endpoint(parsed.hostname, parsed.port)
     if parsed.path not in ('', '/') or (parsed.path and scheme != 'ss'):
@@ -137,13 +142,46 @@ def xray_link(raw, label):
     return f'trojan://{quote(password, safe="")}@{host}:{port}?{urlencode(params, quote_via=quote)}#{quote(label, safe="")}'
 
 
+def hysteria_link(entry, label):
+    # Start with the source, so a conversion that cannot carry a setting does
+    # not accidentally make that setting disappear from the exported URI.
+    node = copy.deepcopy(entry.original)
+    if entry.kind == 'xray':
+        common.reject_extra(node, {'tag', 'protocol', 'settings', 'streamSettings'}, 'Hysteria outbound')
+        stream = node.get('streamSettings', {})
+        common.reject_extra(stream, {'network', 'security', 'hysteriaSettings', 'tlsSettings'}, 'Hysteria transport')
+        tls = stream.get('tlsSettings', {})
+        # Xray v26.3.27 Hysteria uses crypto/tls through GetTLSConfig, which
+        # ignores the uTLS ClientHello fingerprint. It is not a certificate pin.
+        common.reject_extra(tls, {'serverName', 'allowInsecure', 'alpn', 'fingerprint'}, 'Hysteria TLS')
+        if 'allowInsecure' in tls and not isinstance(tls['allowInsecure'], bool):
+            raise Error('Hysteria TLS verification setting must be a boolean')
+        if stream.get('network') != 'hysteria' or stream.get('security') != 'tls' or stream.get('hysteriaSettings', {}).get('version', 2) != 2:
+            raise Error('Hysteria2 share links require the Hysteria2 transport with TLS')
+        node = protocols.xray_to_native(node, [])
+    if entry.kind in {'singbox', 'xray'}:
+        common.reject_extra(node, {'tag', 'type', 'server', 'server_port', 'server_ports', 'password',
+            'auth', 'auth_str', 'up', 'down', 'up_mbps', 'down_mbps', 'obfs', 'tls'}, 'Hysteria share link')
+        tls = node.get('tls', {})
+        common.reject_extra(tls, {'enabled', 'server_name', 'insecure', 'alpn'}, 'Hysteria TLS')
+        if tls.get('enabled') is not True:
+            raise Error('Hysteria share links require TLS')
+        for direction in ('up', 'down'):
+            if direction in node and (node['type'] == 'hysteria2' or direction + '_mbps' in node):
+                raise Error('ambiguous Hysteria bandwidth settings require native configuration')
+        node = protocols.native_to_mihomo(node)
+    return hysteria.mihomo_link(node, label)
+
+
 def entry_link(entry, label):
     if entry.protocol not in SUPPORTED:
-        raise Error('V2Board supports only VLESS, VMess, Trojan and Shadowsocks')
+        raise Error(UNSUPPORTED)
     if not entry.outputs:
         raise Error('no client accepted this configuration')
     if entry.kind == 'uri':
         return normalize_uri(entry.original, label)
+    if entry.protocol in hysteria.SCHEMES:
+        return normalize_uri(hysteria_link(entry, label), label)
     node = entry.outputs.get('xray')
     if node is None and 'hiddify' in entry.outputs:
         node = protocols.native_to_xray(entry.outputs['hiddify'])
