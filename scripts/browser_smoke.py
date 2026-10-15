@@ -73,7 +73,7 @@ def main():
                 expect(page.locator('#workspace')).to_be_visible()
                 checks.append('admin login and incorrect-key handling')
 
-                page.locator('[data-page=devices]').click()
+                page.locator('.nav-item[data-page=devices]').click()
                 page.locator('#add-hwid').click()
                 page.locator('#hwid-name').fill('Browser device')
                 page.locator('#hwid-value').fill('saved-browser-hwid')
@@ -88,6 +88,7 @@ def main():
                 page.locator('#hwid-form button[type=submit]').click()
                 expect(page.locator('#hwid-dialog')).not_to_be_visible()
 
+                page.locator('.nav-item[data-page=providers]').click()
                 page.locator('#add-provider').click()
                 page.locator('#provider-name').fill('Demo')
                 page.locator('#provider-url').fill('https://one.example/sub\nhttps://two.example/sub')
@@ -103,9 +104,9 @@ def main():
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 page.locator('#save-provider').click()
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
-                page.locator('[data-page=overview]').click()
+                page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
-                page.locator('[data-page=servers]').click()
+                page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#check-servers').click()
                 expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
                 expect(page.locator('#server-rows')).to_contain_text('Passed')
@@ -114,12 +115,12 @@ def main():
                 expect(page.locator('#connection-summary')).to_contain_text('0 excluded')
                 assert len(seen)==2
                 checks.append('cached connection checks publish passing nodes without another provider fetch')
-                page.locator('[data-page=overview]').click()
+                page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#stat-servers')).to_have_text('2', timeout=15000)
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 checks.append('explicit per-link devices, test-before-save and reuse of tested responses')
 
-                page.locator('[data-page=devices]').click()
+                page.locator('.nav-item[data-page=devices]').click()
                 first=page.locator('[data-device="'+identities['Browser device']+'"]')
                 second=page.locator('[data-device="'+identities['Second device']+'"]')
                 expect(first).to_contain_text('Demo 1')
@@ -155,6 +156,7 @@ def main():
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/devices-desktop.png',full_page=True)
 
+                page.locator('.nav-item[data-page=providers]').click()
                 page.locator('#add-provider').click()
                 page.locator('#provider-name').fill('No device provider')
                 page.locator('#provider-url').fill('https://no-device.example/sub')
@@ -165,7 +167,7 @@ def main():
                 page.locator('#save-provider').click()
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 assert seen[-1] is None and len(seen)==3
-                page.locator('[data-page=providers]').click()
+                page.locator('.nav-item[data-page=providers]').click()
                 no_device=page.locator('#provider-rows tr').filter(has_text='No device provider')
                 expect(no_device).to_contain_text('No device ID')
                 page.once('dialog',lambda dialog:dialog.accept())
@@ -173,7 +175,7 @@ def main():
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
                 checks.append('explicit no-device subscription and removal')
 
-                page.locator('[data-page=servers]').click()
+                page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#protocol-filter').select_option('shadowsocks')
                 expect(page.locator('#server-rows tr')).to_have_count(1)
                 expect(page.locator('#server-rows')).to_contain_text('Tokyo')
@@ -205,7 +207,7 @@ def main():
                 assert len(seen) == fetch_count
                 checks.append('show failed nodes, filter excluded results and recover without fetching providers')
 
-                page.locator('[data-page=exports]').click()
+                page.locator('.nav-item[data-page=exports]').click()
                 page.locator('[data-copy="hiddify.json"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
                 copied = page.evaluate('navigator.clipboard.readText()')
@@ -226,8 +228,10 @@ def main():
                 legacy_link = v2board_link
                 # The earlier replacement intentionally invalidated Demo 1's
                 # cache. Refresh the synthetic providers before scoping feeds.
+                page.locator('.nav-item[data-page=providers]').click()
                 page.locator('#refresh-button').click()
                 expect(page.locator('#provider-rows tr').first.locator('.server-count')).to_have_text('2', timeout=15000)
+                page.locator('.nav-item[data-page=exports]').click()
                 expect(page.locator('#add-subscription')).to_be_enabled(timeout=15000)
                 subscription_fetches = len(seen)
                 providers = manager.store.config()['providers']
@@ -239,7 +243,7 @@ def main():
                 page.locator('#save-subscription').click()
                 expect(page.locator('#subscription-dialog')).not_to_be_visible()
                 expect(page.locator('#subscription-total')).to_have_text('2')
-                phone_id = page.locator('#subscription-select').input_value()
+                phone_id = page.locator('#subscription-list [aria-current=true]').get_attribute('data-subscription-id')
                 expect(page.locator('#subscription-summary')).to_contain_text('2 of 2 servers included')
                 page.locator('[data-copy="combined.json"]').click()
                 phone_link = page.evaluate('navigator.clipboard.readText()')
@@ -259,13 +263,31 @@ def main():
                 expect(page.locator('#subscription-provider-choices input').first).to_be_disabled()
                 page.locator('#save-subscription').click()
                 expect(page.locator('#subscription-dialog')).not_to_be_visible()
-                family_id = page.locator('#subscription-select').input_value()
+                family_id = page.locator('#subscription-list [aria-current=true]').get_attribute('data-subscription-id')
                 expect(page.locator('#subscription-total')).to_have_text('3')
                 page.locator('[data-copy="v2board.txt"]').click()
                 family_link = page.evaluate('navigator.clipboard.readText()')
                 assert family_link != legacy_link
-                page.locator('#subscription-select').select_option(phone_id)
+                page.locator('#subscription-search').fill('my phone')
+                expect(page.locator('#subscription-list > li')).to_have_count(1)
+                page.locator('#subscription-search').fill('no such subscription')
+                expect(page.locator('#subscriptions-no-results')).to_be_visible()
+                page.locator('#clear-subscription-search').click()
+                expect(page.locator('#subscription-list > li')).to_have_count(3)
+                expect(page.locator('#subscription-search')).to_be_focused()
+                page.locator('[data-subscription-id="'+phone_id+'"]').click()
+                expect(page.locator('#subscription-detail-name')).to_have_text('My phone <private>')
+                page.locator('#show-subscription-urls').check()
+                expect(page.locator('.export-url input').first).to_have_value(phone_link.replace('combined.json','hiddify.json'))
+                page.locator('#show-subscription-urls').uncheck()
+                expect(page.locator('.export-url').first).not_to_be_visible()
+                page.locator('#subscription-menu summary').click()
+                page.keyboard.press('Escape')
+                expect(page.locator('#subscription-menu summary')).to_be_focused()
+                expect(page.locator('#rotate-links')).not_to_be_visible()
+                checks.append('search subscriptions, recover from empty results, reveal URLs and dismiss actions with the keyboard')
                 page.once('dialog', lambda dialog: dialog.accept())
+                page.locator('#subscription-menu summary').click()
                 page.locator('#rotate-links').click()
                 expect(page.locator('#toast')).to_contain_text('New subscription links')
                 assert page.request.get(phone_link).status == 404
@@ -273,8 +295,24 @@ def main():
                 assert page.request.get(legacy_link).status == 200
                 page.set_viewport_size({'width':390,'height':844})
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                page.locator('#back-to-subscriptions').click()
+                expect(page.locator('#subscription-list')).to_be_visible()
+                expect(page.locator('#subscription-detail')).not_to_be_visible()
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-list-mobile.png',full_page=True)
+                page.locator('[data-subscription-id="'+phone_id+'"]').focus()
+                page.keyboard.press('Enter')
+                expect(page.locator('#subscription-detail-name')).to_be_focused()
+                expect(page.locator('#subscription-list')).not_to_be_visible()
                 page.locator('#edit-subscription').click()
                 expect(page.locator('#subscription-name')).to_have_value('My phone <private>')
+                page.locator('#subscription-provider-search').fill(providers[1]['name'])
+                expect(page.locator('.provider-choice:visible')).to_have_count(1)
+                page.locator('#clear-selected-providers').click()
+                expect(page.locator('#subscription-selection-summary')).to_contain_text('0 providers selected')
+                page.locator('#select-active-providers').click()
+                expect(page.locator('#subscription-selection-summary')).to_contain_text('2 providers selected')
+                page.locator('#subscription-provider-search').fill('')
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-dialog-mobile.png',full_page=True)
@@ -285,16 +323,18 @@ def main():
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/subscriptions-desktop.png',full_page=True)
                 page.once('dialog', lambda dialog: dialog.accept())
+                page.locator('#subscription-menu summary').click()
                 page.locator('#delete-subscription').click()
-                expect(page.locator('#subscription-select')).to_have_value('default')
+                expect(page.locator('[data-subscription-id=default]')).to_have_attribute('aria-current','true')
                 expect(page.locator('#delete-subscription')).to_be_disabled()
                 expect(page.locator('#subscription-total')).to_have_text('2')
-                page.locator('#subscription-select').select_option(family_id)
+                page.locator('[data-subscription-id="'+family_id+'"]').click()
                 assert page.request.get(family_link).status == 200
                 assert len(seen) == subscription_fetches
                 checks.append('independent subscription links, rotation, deletion, safe names and mobile controls without extra fetches')
+                checks.append('mobile list and detail navigation, keyboard selection and searchable provider choices')
 
-                page.locator('[data-page=providers]').click()
+                page.locator('.nav-item[data-page=providers]').click()
                 page.locator('[data-action=edit]').first.click()
                 page.locator('#provider-name').fill('Renamed provider')
                 page.locator('#save-provider').click()
@@ -309,14 +349,14 @@ def main():
                 expect(page.locator('#provider-rows tr')).to_have_count(1)
                 checks.append('edit, pause and delete providers')
 
-                page.locator('[data-page=devices]').click()
+                page.locator('.nav-item[data-page=devices]').click()
                 expect(second.locator('[data-device-action=delete]')).to_be_enabled()
                 page.once('dialog',lambda dialog:dialog.accept())
                 second.locator('[data-device-action=delete]').click()
                 expect(second).to_have_count(0)
                 checks.append('delete a device only after its subscription is removed')
 
-                page.locator('[data-page=settings]').click()
+                page.locator('.nav-item[data-page=settings]').click()
                 page.locator('#refresh-interval').select_option('900')
                 page.locator('#schedule-form button').click()
                 expect(page.locator('#toast')).to_contain_text('saved')
@@ -328,7 +368,7 @@ def main():
                 assert manager.store.config()['check_seconds'] == 900
                 checks.append('persist independent connection-check schedule')
 
-                page.locator('[data-page=activity]').click()
+                page.locator('.nav-item[data-page=activity]').click()
                 expect(page.locator('#log-output')).to_contain_text('Subscription job completed')
                 expect(page.locator('#log-retention')).to_contain_text('4 MiB maximum')
                 manager.logs.write('provider_failed', provider_id='browser-test', reason='provider returned HTTP 429')
@@ -351,11 +391,18 @@ def main():
                 page.set_viewport_size({'width':1440,'height':1000})
                 checks.append('private debug history, severity filters, manual refresh and mobile log view')
 
-                page.locator('[data-page=overview]').click()
+                page.locator('.nav-item[data-page=overview]').click()
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
                 page.set_viewport_size({'width':390, 'height':844})
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
-                page.locator('[data-page=devices]').click()
+                for name in ('overview','providers','devices','servers','exports','activity','settings'):
+                    button = page.locator('.nav-item[data-page='+name+']')
+                    expect(button).to_be_visible()
+                    assert button.bounding_box()['width'] >= 44
+                page.locator('.nav-item[data-page=activity]').click()
+                expect(page.locator('#logs-section')).to_be_visible()
+                checks.append('all seven labeled navigation actions remain accessible on mobile')
+                page.locator('.nav-item[data-page=devices]').click()
                 expect(page.locator('#devices-section')).to_be_visible()
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/devices-mobile.png',full_page=True)

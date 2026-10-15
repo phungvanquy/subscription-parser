@@ -1,6 +1,8 @@
 "use strict";
 const $ = id => document.getElementById(id);
 const paths = {
+  search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
+  more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
   grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   layers:'<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
   server:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6"/>',
@@ -25,14 +27,37 @@ const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'
 let state=null,page='overview',toastTimer,pollTimer;
 let logRequest=0,selectedSubscription='default',subscriptionWorking=false;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
-const titles={overview:['SUBSCRIPTION WORKSPACE','Your connections, together.','One library. Multiple providers. Ready for your favorite client.','Overview'],providers:['YOUR SOURCES','Every provider, in one place.','Add subscriptions and keep their device identities consistent.','Providers'],servers:['COMBINED LIBRARY','Find your next connection.','Explore your servers and see which clients can import them.','Server library'],exports:['READY TO IMPORT','Your links, your providers.','Create subscriptions with their own provider selections and stable import links.','Subscription links'],activity:['WORKSPACE HISTORY','Activity and logs.','Review recent events and debug problems with subscriptions.','Activity & logs'],devices:['SAVED DEVICES','Your device identities.','See where each device is used and manage its saved ID.','Devices'],settings:['WORKSPACE SETTINGS','Keep things running your way.','Manage your subscription refresh schedule.','Settings']};
+const titles={
+  overview:['YOUR WORKSPACE','Overview','Your providers, connection checks and subscriptions at a glance.','Overview'],
+  providers:['SUBSCRIPTION SOURCES','Providers','Manage source subscriptions and the devices used to fetch them.','Providers'],
+  servers:['CONNECTION CHECKS','Server library','See which servers pass, which fail and the formats they support.','Server library'],
+  exports:['YOUR SUBSCRIPTIONS','Subscriptions','Choose providers. Copy a link. Keep your clients up to date.','Subscription links'],
+  activity:['WORKSPACE HISTORY','Activity & logs','Recent refreshes, connection checks and debug messages.','Activity & logs'],
+  devices:['PROVIDER ACCESS','Devices','Manage saved device IDs and see which providers use them.','Devices'],
+  settings:['WORKSPACE SETTINGS','Settings','Set the schedule for provider refreshes and connection checks.','Settings']
+};
+function setHTML(id,html){const el=$(id);if(el.innerHTML!==html)el.innerHTML=html;}
+
 async function api(path,options={}){const response=await fetch('/api'+path,{...options,headers:{'Content-Type':'application/json',...(options.headers||{})}});let data;try{data=await response.json();}catch{throw new Error('The server returned an unexpected response.');}if(!response.ok){if(response.status===401&&path!='/login')showLogin();throw new Error(data.detail||'Request failed');}return data;}
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
 function relative(value){if(!value)return 'Never';const seconds=Math.max(0,(Date.now()-new Date(value).getTime())/1000);if(seconds<60)return 'Just now';if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;return new Date(value).toLocaleDateString();}
 function date(value){return value?new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
 function interval(value){return value===3600?'Hourly':value>=3600?`${value/3600} hours`:`${value/60} min`;}
 function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;state=null;}
-function selectPage(name){page=name;document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===name));const t=titles[name];$('page-eyebrow').textContent=t[0];$('page-title').textContent=t[1];$('page-description').textContent=t[2];$('breadcrumb-page').textContent=t[3];$('overview-stats').hidden=name!=='overview';const visible={overview:['providers','exports','diagnostics'],providers:['providers'],servers:['servers','diagnostics'],exports:['exports','diagnostics'],activity:['logs','activity'],devices:['devices'],settings:['settings']}[name];document.querySelectorAll('.page-section').forEach(s=>s.hidden=!visible.includes(s.id.replace('-section','')));window.scrollTo({top:0,behavior:'instant'});if(name==='activity')loadLogs();}
+function selectPage(name){
+  page=name;
+  document.querySelectorAll('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.page===name);if(b.dataset.page===name)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
+  const t=titles[name];$('page-eyebrow').textContent=t[0];$('page-title').textContent=t[1];$('page-description').textContent=t[2];$('breadcrumb-page').textContent=t[3];
+  $('overview-stats').hidden=name!=='overview';
+  $('add-provider').hidden=!['overview','providers'].includes(name);
+  $('add-subscription').hidden=name!=='exports';
+  $('refresh-button').hidden=!['overview','providers','servers'].includes(name);
+  const visible={overview:['providers','subscription-overview'],providers:['providers'],servers:['servers','diagnostics'],exports:['exports'],activity:['logs','activity'],devices:['devices'],settings:['settings']}[name];
+  document.querySelectorAll('.page-section').forEach(s=>s.hidden=!visible.includes(s.id.replace(/-section$/,'')));
+  $('subscriptions-layout').classList.remove('show-detail');$('subscription-menu').open=false;
+  window.scrollTo({top:0,behavior:'instant'});
+  if(name==='activity')loadLogs();
+}
 document.querySelectorAll('[data-page]').forEach(b=>b.addEventListener('click',()=>selectPage(b.dataset.page)));
 async function loadLogs(){
   if(!state||page!=='activity')return;
@@ -55,7 +80,7 @@ async function loadLogs(){
 }
 $('refresh-logs').addEventListener('click',loadLogs);
 $('log-level').addEventListener('change',loadLogs);
-async function loadState(){clearTimeout(pollTimer);try{state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
+async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad)selectPage(page);pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
 function render(){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
   $('nav-provider-count').textContent=providers.length;$('provider-total').textContent=providers.length;
@@ -81,53 +106,112 @@ function render(){
   $('footer-time').textContent=state.generated_at?`Last updated ${date(state.generated_at)}`:'';
 }
 function currentSubscription(){return state?.subscriptions.find(s=>s.id===selectedSubscription);}
+function subscriptionProviders(subscription){return state.providers.filter(p=>subscription.all_providers||subscription.provider_ids.includes(p.id));}
+function subscriptionStatus(subscription){
+  if(!subscriptionProviders(subscription).some(p=>p.enabled))return {label:'No active providers',tone:'paused'};
+  if(!subscription.ready)return {label:'Checks pending',tone:'pending'};
+  if(!subscription.published_total)return {label:'No passing servers',tone:'empty'};
+  return {label:'Ready to import',tone:'ready'};
+}
+function providerSummary(subscription){
+  if(subscription.all_providers)return 'All providers';
+  const providers=subscriptionProviders(subscription);
+  return providers.length?providers.map(p=>p.name).join(', '):'No providers selected';
+}
+function renderSubscriptionList(){
+  if(!state)return;
+  const query=$('subscription-search').value.trim().toLocaleLowerCase();
+  const matches=state.subscriptions.filter(s=>`${s.name} ${providerSummary(s)}`.toLocaleLowerCase().includes(query));
+  const focused=document.activeElement?.dataset.subscriptionId;
+  setHTML('subscription-list',matches.map(s=>{
+    const status=subscriptionStatus(s);
+    return `<li><button class="subscription-item ${s.id===selectedSubscription?'selected':''}" data-subscription-id="${esc(s.id)}" ${s.id===selectedSubscription?'aria-current="true"':''}><span class="subscription-item-top"><strong>${esc(s.name)}</strong>${s.id==='default'?'<span class="original-badge">Original</span>':''}</span><span class="subscription-item-providers">${esc(providerSummary(s))}</span><span class="subscription-item-bottom"><span class="subscription-dot ${status.tone}"></span><span>${s.published_total?`${s.published_total} included`:status.label}</span><span class="subscription-item-total">${s.total} total ${icon('link')}</span></span></button></li>`;
+  }).join(''));
+  $('subscriptions-no-results').hidden=matches.length>0;
+  $('subscription-search-summary').textContent=`${matches.length} of ${state.subscriptions.length} subscriptions`;
+  if(focused)document.querySelector(`#subscription-list [data-subscription-id="${CSS.escape(focused)}"]`)?.focus({preventScroll:true});
+}
 function renderSubscriptions(){
   if(!currentSubscription())selectedSubscription='default';
-  const subscription=currentSubscription();
+  const subscription=currentSubscription(),providers=subscriptionProviders(subscription),active=providers.filter(p=>p.enabled).length,status=subscriptionStatus(subscription);
   $('subscription-total').textContent=state.subscriptions.length;
-  $('subscription-select').innerHTML=state.subscriptions.map(s=>`<option value="${esc(s.id)}">${esc(s.name)}</option>`).join('');
-  $('subscription-select').value=selectedSubscription;
-  const providers=state.providers.filter(p=>subscription.all_providers||subscription.provider_ids.includes(p.id));
-  $('subscription-summary').textContent=`${subscription.published_total} of ${subscription.total} servers included · ${providers.filter(p=>p.enabled).length} enabled provider(s)${subscription.ready?'':' · Waiting for current connection checks'}`;
-  $('subscription-providers-summary').textContent=subscription.all_providers?'All enabled providers, including future additions':providers.map(p=>p.name+(p.enabled?'':' (paused)')).join(', ')||'No providers remain selected. Edit this subscription to add providers.';
-  $('add-subscription').disabled=state.busy;
-  $('edit-subscription').disabled=state.busy;
+  $('overview-subscription-total').textContent=state.subscriptions.length;
+  setHTML('subscription-overview',state.subscriptions.slice(0,3).map(s=>`<button class="subscription-preview" data-open-subscription="${esc(s.id)}"><span class="preview-icon">${icon('link')}</span><span class="preview-copy"><strong>${esc(s.name)}</strong><small>${esc(providerSummary(s))}</small></span><span class="preview-count"><strong>${s.published_total}</strong><small>included</small></span><span aria-hidden="true">→</span></button>`).join(''));
+  renderSubscriptionList();
+  $('subscription-detail-name').textContent=subscription.name;
+  $('subscription-updated').textContent=subscription.generated_at?`Updated ${relative(subscription.generated_at).toLowerCase()}`:'Not generated yet';
+  $('subscription-status').textContent=status.label;$('subscription-status').className='subscription-status '+status.tone;
+  $('subscription-summary').textContent=`${subscription.published_total} of ${subscription.total} servers included`;
+  $('subscription-published').textContent=subscription.published_total;
+  $('subscription-excluded').textContent=Math.max(0,subscription.total-subscription.published_total);
+  $('subscription-active-providers').textContent=active;
+  $('subscription-provider-metric').textContent=`Active of ${providers.length} provider${providers.length===1?'':'s'}`;
+  $('subscription-scope').textContent=subscription.all_providers?'New providers join automatically':'Selected providers only';
+  setHTML('subscription-providers-summary',providers.map(p=>`<span class="provider-chip ${p.enabled?'':'paused'}"><span class="subscription-dot ${p.enabled?'ready':'paused'}"></span><span>${esc(p.name)}</span>${p.enabled?'':'<small>Paused</small>'}</span>`).join('')||'<p class="no-sources">No providers selected. Use Edit to add a source.</p>');
+  $('add-subscription').disabled=state.busy;$('edit-subscription').disabled=state.busy;
   $('delete-subscription').disabled=state.busy||subscription.id==='default';
-  $('delete-subscription').title=subscription.id==='default'?'The original subscription is kept to preserve existing links':'';
-  const formats=[['hiddify.json','Hiddify','hiddify','h','Native JSON · sing-box','Import the full JSON subscription in Hiddify.'],['mihomo.yaml','Mihomo','mihomo','m','Native YAML · Clash compatible','Import as a configuration or proxy provider.'],['xray.json','Xray','xray','x','Native JSON · outbounds','Preserves original Xray chains and dependencies.'],['v2board.txt','V2Board','v2board','v','Text · proxy URI subscription','Import into External Subscriptions in V2Board.'],['combined.json','Combined archive','combined','{ }','JSON · all client formats','Download all converted formats and compatibility notes.']];
-  $('export-cards').innerHTML=formats.map(([file,name,key,mark,format,description])=>`<article class="export-card"><div class="export-top"><span class="client-logo ${key}">${mark}</span><div><div class="export-name">${name}</div><div class="export-format">${format}</div></div><span class="export-count">${key==='combined'?(subscription.published_total||0):(subscription.counts[key]||0)} servers</span></div><p>${description}</p><div class="link-display">${icon('link')}<span title="${esc(subscription.links[file])}">${esc(subscription.links[file])}</span></div><div class="export-actions"><button class="button secondary" data-copy="${file}">${icon('copy')} Copy link</button><a href="${esc(subscription.links[file])}" download="${file}">${icon('download')} Download</a></div></article>`).join('');
+  $('original-subscription-note').hidden=subscription.id!=='default';
+  $('subscription-empty-notice').hidden=!!subscription.published_total;
+  const formats=[['hiddify.json','Hiddify','hiddify','h','JSON · sing-box'],['mihomo.yaml','Mihomo','mihomo','m','YAML · Clash compatible'],['xray.json','Xray','xray','x','JSON · native outbounds'],['v2board.txt','V2Board','v2board','v','URI list · External Subscriptions'],['combined.json','Combined archive','combined','{ }','JSON · all formats & diagnostics']];
+  setHTML('export-cards',formats.map(([file,name,key,mark,format])=>{
+    const count=key==='combined'?subscription.published_total:(subscription.counts[key]||0),available=subscription.ready&&(key==='combined'||count>0);
+    return `<article class="export-card format-row ${key==='combined'?'archive-row':''}"><div class="format-main"><span class="client-logo ${key}" aria-hidden="true">${mark}</span><div class="format-description"><h4 class="export-name">${name}</h4><p class="export-format">${format}</p></div><span class="export-count ${count?'':'empty'}">${count} servers</span><div class="export-actions"><button class="button secondary" data-copy="${file}" aria-label="Copy ${name} subscription link">${icon('copy')}<span>Copy link</span></button>${available?`<a class="icon-button download-link" href="${esc(subscription.links[file])}" download="${file}" aria-label="Download ${name}" title="Download ${name}">${icon('download')}</a>`:`<button class="icon-button download-link" disabled aria-label="Download ${name} unavailable" title="No current servers to download">${icon('download')}</button>`}</div></div><label class="export-url" ${$('show-subscription-urls').checked?'':'hidden'}><span class="sr-only">${name} subscription URL</span><input readonly value="${esc(subscription.links[file])}" spellcheck="false"></label></article>`;
+  }).join(''));
 }
-$('subscription-select').addEventListener('change',()=>{selectedSubscription=$('subscription-select').value;renderSubscriptions();});
+function showSubscription(identifier,focus=true){
+  selectedSubscription=identifier;$('subscription-menu').open=false;renderSubscriptions();
+  $('subscriptions-layout').classList.add('show-detail');
+  if(window.matchMedia('(max-width:760px)').matches){$('exports-section').scrollIntoView({block:'start'});if(focus)$('subscription-detail-name').focus({preventScroll:true});}
+}
+$('subscription-list').addEventListener('click',event=>{const button=event.target.closest('[data-subscription-id]');if(button)showSubscription(button.dataset.subscriptionId);});
+$('subscription-overview').addEventListener('click',event=>{const button=event.target.closest('[data-open-subscription]');if(button){selectPage('exports');showSubscription(button.dataset.openSubscription);}});
+$('subscription-search').addEventListener('input',renderSubscriptionList);
+$('clear-subscription-search').addEventListener('click',()=>{$('subscription-search').value='';renderSubscriptionList();$('subscription-search').focus();});
+$('back-to-subscriptions').addEventListener('click',()=>{$('subscriptions-layout').classList.remove('show-detail');document.querySelector(`#subscription-list [data-subscription-id="${CSS.escape(selectedSubscription)}"]`)?.focus({preventScroll:true});$('exports-section').scrollIntoView({block:'start'});});
+$('show-subscription-urls').addEventListener('change',()=>document.querySelectorAll('.export-url').forEach(el=>el.hidden=!$('show-subscription-urls').checked));
+$('export-cards').addEventListener('click',event=>{if(event.target.matches('.export-url input'))event.target.select();});
+document.addEventListener('click',event=>{if(!event.target.closest('#subscription-menu'))$('subscription-menu').open=false;});
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&$('subscription-menu').open){$('subscription-menu').open=false;$('subscription-menu').querySelector('summary').focus();}});
+function updateProviderSelection(){
+  const all=$('subscription-all').checked,query=$('subscription-provider-search').value.trim().toLocaleLowerCase();
+  $('subscription-provider-options').disabled=all;$('subscription-provider-options').hidden=all;
+  const choices=[...$('subscription-provider-choices').querySelectorAll('input')];
+  choices.forEach(input=>{input.closest('label').hidden=!input.closest('label').textContent.toLocaleLowerCase().includes(query);});
+  $('provider-selection-no-results').hidden=!choices.length||choices.some(input=>!input.closest('label').hidden);
+  const chosen=all?state.providers:state.providers.filter(p=>choices.some(input=>input.checked&&input.value===p.id));
+  $('subscription-selection-summary').textContent=`${all?'All ':''}${chosen.length} provider${chosen.length===1?'':'s'} selected · ${chosen.filter(p=>p.enabled).length} active`;
+}
 function openSubscription(subscription){
-  $('subscription-form').reset();$('subscription-error').textContent='';
-  $('subscription-id').value=subscription?.id||'';
-  $('subscription-name').value=subscription?.name||'';
-  $('subscription-all').checked=subscription?.all_providers||false;
+  $('subscription-menu').open=false;$('subscription-form').reset();$('subscription-error').textContent='';
+  $('subscription-id').value=subscription?.id||'';$('subscription-name').value=subscription?.name||'';$('subscription-all').checked=subscription?.all_providers||false;
   $('subscription-dialog-title').textContent=subscription?'Edit subscription':'New subscription';
-  $('subscription-provider-choices').innerHTML=state.providers.map(p=>`<label class="check-label"><input type="checkbox" value="${esc(p.id)}" ${subscription?.provider_ids.includes(p.id)?'checked':''}><span>${esc(p.name)}${p.enabled?'':' · Paused'}</span></label>`).join('')||'<p class="hint">Add providers first, or choose all enabled providers to include future additions.</p>';
-  $('subscription-provider-options').disabled=$('subscription-all').checked;
-  $('subscription-dialog').showModal();
+  $('subscription-provider-choices').innerHTML=state.providers.map(p=>`<label class="check-label provider-choice"><input type="checkbox" value="${esc(p.id)}" ${subscription?.provider_ids.includes(p.id)?'checked':''}><span><strong>${esc(p.name)}</strong><small>${p.count||0} servers</small></span><span class="provider-choice-status ${p.enabled?'':'paused'}">${p.enabled?'Active':'Paused'}</span></label>`).join('')||'<p class="hint">Add a provider first, or use all providers to include sources you add later.</p>';
+  updateProviderSelection();$('subscription-dialog').showModal();$('subscription-name').focus();
 }
 $('add-subscription').addEventListener('click',()=>openSubscription());
 $('edit-subscription').addEventListener('click',()=>openSubscription(currentSubscription()));
-$('subscription-all').addEventListener('change',()=>$('subscription-provider-options').disabled=$('subscription-all').checked);
+$('subscription-all').addEventListener('change',updateProviderSelection);
+$('subscription-provider-search').addEventListener('input',updateProviderSelection);
+$('subscription-provider-choices').addEventListener('change',updateProviderSelection);
+$('select-active-providers').addEventListener('click',()=>{$('subscription-provider-choices').querySelectorAll('input').forEach(el=>el.checked=state.providers.some(p=>p.id===el.value&&p.enabled));updateProviderSelection();});
+$('clear-selected-providers').addEventListener('click',()=>{$('subscription-provider-choices').querySelectorAll('input').forEach(el=>el.checked=false);updateProviderSelection();});
 $('subscription-dialog').addEventListener('cancel',event=>{if(subscriptionWorking)event.preventDefault();});
 $('subscription-form').addEventListener('submit',async event=>{
   event.preventDefault();$('subscription-error').textContent='';
   const all=$('subscription-all').checked,providers=all?[]:[...$('subscription-provider-choices').querySelectorAll('input:checked')].map(el=>el.value);
   if(!all&&!providers.length){$('subscription-error').textContent='Choose one or more providers.';return;}
   const id=$('subscription-id').value;
-  subscriptionWorking=true;$('subscription-form').querySelectorAll('input,button').forEach(el=>el.disabled=true);
+  subscriptionWorking=true;$('subscription-form').querySelectorAll('input,button').forEach(el=>el.disabled=true);$('save-subscription').textContent='Saving…';
   try{
     const result=await api('/subscriptions'+(id?'/'+encodeURIComponent(id):''),{method:id?'PUT':'POST',body:JSON.stringify({name:$('subscription-name').value,all_providers:all,provider_ids:providers})});
-    selectedSubscription=result.id;$('subscription-dialog').close();await loadState();toast(id?'Subscription updated; its links are unchanged':'Subscription created');
+    selectedSubscription=result.id;$('subscription-search').value='';$('subscription-dialog').close();await loadState();showSubscription(result.id);toast(id?'Subscription updated; its links are unchanged':'Subscription created');
   }catch(error){$('subscription-error').textContent=error.message;}
-  finally{subscriptionWorking=false;$('subscription-form').querySelectorAll('input,button').forEach(el=>el.disabled=false);}
+  finally{subscriptionWorking=false;$('subscription-form').querySelectorAll('input,button').forEach(el=>el.disabled=false);$('save-subscription').textContent='Save subscription';}
 });
 $('delete-subscription').addEventListener('click',async()=>{
-  const subscription=currentSubscription();
+  const subscription=currentSubscription();$('subscription-menu').open=false;
   if(!subscription||subscription.id==='default'||!confirm(`Delete “${subscription.name}”? Its import links will stop working.`))return;
-  try{await api('/subscriptions/'+encodeURIComponent(subscription.id),{method:'DELETE'});selectedSubscription='default';await loadState();toast('Subscription deleted');}catch(error){toast(error.message);}
+  try{await api('/subscriptions/'+encodeURIComponent(subscription.id),{method:'DELETE'});selectedSubscription='default';$('subscription-search').value='';await loadState();$('subscriptions-layout').classList.remove('show-detail');toast('Subscription deleted');}catch(error){toast(error.message);}
 });
 function connectionCell(value){
   const status=value?.status||'pending',label={passed:'Passed',failed:'Failed',unsupported:'Unsupported',error:'Check error',pending:'Pending',stale:'Expired'}[status]||status;
@@ -301,7 +385,7 @@ $('hwid-form').addEventListener('submit',async event=>{
 });
 async function copy(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const input=document.createElement('textarea');input.value=text;input.setAttribute('readonly','');document.body.appendChild(input);input.select();const success=document.execCommand('copy');input.remove();if(!success)throw new Error('Clipboard unavailable. Select and copy the subscription URL.');}
 $('export-cards').addEventListener('click',async event=>{const button=event.target.closest('[data-copy]');if(!button)return;try{await copy(currentSubscription().links[button.dataset.copy]);toast('Subscription link copied');}catch(error){toast(error.message);}});
-$('rotate-links').addEventListener('click',async()=>{const subscription=currentSubscription();if(!subscription||!confirm(`Rotate links for “${subscription.name}”? Only its existing links will stop working.`))return;try{await api('/subscriptions/'+encodeURIComponent(subscription.id)+'/rotate-link',{method:'POST'});await loadState();toast('New subscription links are ready');}catch(error){toast(error.message);}});
+$('rotate-links').addEventListener('click',async()=>{const subscription=currentSubscription();$('subscription-menu').open=false;if(!subscription||!confirm(`Rotate links for “${subscription.name}”? Only its existing links will stop working.`))return;try{await api('/subscriptions/'+encodeURIComponent(subscription.id)+'/rotate-link',{method:'POST'});await loadState();toast('New subscription links are ready');}catch(error){toast(error.message);}});
 $('schedule-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({refresh_seconds:Number($('refresh-interval').value)})});await loadState();toast('Refresh schedule saved');}catch(error){toast(error.message);}});
 $('login-form').addEventListener('submit',async event=>{event.preventDefault();$('login-error').textContent='';try{await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value})});$('admin-key').value='';await loadState();if(page==='activity')loadLogs();}catch(error){$('login-error').textContent=error.message;}});
 $('logout-button').addEventListener('click',async()=>{await api('/logout',{method:'POST'});showLogin();});

@@ -25,8 +25,8 @@ and is never rewritten by the app.
    link. Only recently passing nodes from its enabled providers are included.
 
 You can create any number of named subscriptions; there is no fixed count limit.
-Each has independent URLs for all five output formats. **Edit providers** changes
-its name and provider selection without changing its URLs. **All enabled providers**
+Each has independent URLs for all five output formats. **Edit** changes
+its name and provider selection without changing its URLs. **Use all providers**
 also includes providers added later; a specific selection includes only those
 saved provider IDs, even after a provider is renamed. Paused providers remain
 selected but contribute no servers. Deleting a provider removes that assignment;
@@ -35,7 +35,12 @@ a selection that becomes empty never falls back to all providers.
 The original subscription is migrated as **All providers**, preserving its token
 and existing client URLs. You can edit or rotate it; it cannot be deleted.
 New subscriptions can be deleted independently without deleting providers or HWIDs.
-The export cards show counts for the selected subscription. Overview, server library
+The searchable subscription list shows each selection and its included server count.
+Select an entry to see its providers, included/excluded totals and client import
+links. **Copy link** copies the chosen format; **Show URLs** reveals the addresses.
+On a phone, **All subscriptions** returns to the list. The **More subscription
+actions** menu contains link rotation and deletion.
+The import rows show counts for the selected subscription. Overview, server library
 and compatibility notes describe the entire workspace; each combined archive
 contains diagnostics and inventory only for its own selection.
 
@@ -491,7 +496,8 @@ docker run --rm --user 0 subscription-parser:dev sh -c 'python -m playwright ins
 
 The browser script exercises login, HWID labels, provider forms, filtering,
 named subscriptions, provider selections, independent link rotation and deletion,
-export links, scheduling and mobile navigation against synthetic data. It never
+export links, subscription/provider search, keyboard controls, scheduling and
+mobile navigation against synthetic data. It never
 changes live providers. `PARSER_TEST_BROWSER` can select an existing Chromium
 executable in the test environment.
 
