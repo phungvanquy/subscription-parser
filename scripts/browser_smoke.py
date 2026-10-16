@@ -654,13 +654,27 @@ def main():
                 checks.append('2FA setup verifies the key and code, renders a local QR and shows recovery codes once')
 
                 page.locator('#logout-button').click()
+                # A password manager or restored form can populate a hidden
+                # field. It must never skip the prompt for the second factor.
+                expect(page.locator('#login-factor')).not_to_be_visible()
+                page.locator('#login-code').evaluate('(input, value) => input.value = value', code)
                 page.locator('#admin-key').fill(admin)
-                page.locator('#login-submit').click()
+                with page.expect_response('**/api/login') as response:
+                    page.locator('#login-submit').click()
+                assert response.value.request.post_data_json == {'token': admin, 'code': ''}
+                assert response.value.json() == {'authenticated': False, 'requires_two_factor': True}
                 expect(page.locator('#login-factor')).to_be_visible()
                 expect(page.locator('#workspace')).not_to_be_visible()
+                expect(page.locator('#login-code')).to_be_enabled()
+                expect(page.locator('#login-code')).to_have_value('')
+                expect(page.locator('#login-error')).to_have_text('')
+                expect(page.locator('#login-factor')).to_contain_text('Admin key accepted')
+                expect(page.locator('#login-submit')).to_contain_text('Verify')
+                checks.append('hidden autofilled codes are ignored and the second-factor prompt is explicit')
                 page.locator('#login-code').fill(code)
                 page.locator('#login-submit').click()
-                expect(page.locator('#login-error')).to_contain_text('incorrect')
+                expect(page.locator('#login-error')).to_contain_text('verification code is incorrect')
+                expect(page.locator('#login-error')).not_to_contain_text('admin key')
                 auth_time[0] += 30
                 page.locator('#login-code').fill(pyotp.TOTP(seed).at(auth_time[0]))
                 page.locator('#login-submit').click()
@@ -678,6 +692,8 @@ def main():
                 assert set(recovery).isdisjoint(replacement_codes)
                 page.locator('[data-close=recovery-dialog]').click()
                 page.locator('#logout-button').click()
+                expect(page.locator('#login-code')).to_be_disabled()
+                expect(page.locator('#login-submit')).to_contain_text('Open workspace')
                 page.locator('#admin-key').fill(admin)
                 page.locator('#login-submit').click()
                 expect(page.locator('#login-factor')).to_be_visible()

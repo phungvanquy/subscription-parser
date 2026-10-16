@@ -139,7 +139,12 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(response.json(), {'authenticated': False, 'requires_two_factor': True})
         self.assertNotIn('set-cookie', response.headers)
         self.assertEqual(self.client.get('/api/state').status_code, 401)
-        self.assertEqual(self.login('wrong').status_code, 401)
+        rejected = self.login('wrong')
+        self.assertEqual(rejected.status_code, 401)
+        self.assertIn('verification code is incorrect', rejected.json()['detail'])
+        self.assertNotIn('admin key', rejected.json()['detail'])
+        self.assertNotIn('set-cookie', rejected.headers)
+        self.assertEqual(self.client.get('/api/state').status_code, 401)
         self.now += 30
         self.assertTrue(self.login(pyotp.TOTP(secret).at(self.now)).json()['authenticated'])
 

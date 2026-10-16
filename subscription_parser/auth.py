@@ -165,7 +165,7 @@ class Auth:
                 try:
                     recovered = self._consume_factor(connection, settings, code.strip())
                 except AuthError:
-                    raise AuthError(401, 'incorrect admin key or verification code; wait for a new code or use a recovery code') from None
+                    raise AuthError(401, 'verification code is incorrect, expired or already used; enter a fresh authenticator code or an unused recovery code') from None
                 if recovered:
                     connection.execute('DELETE FROM auth_sessions')
             return {'authenticated': True, 'recovery_used': recovered}, self._new_session(connection)

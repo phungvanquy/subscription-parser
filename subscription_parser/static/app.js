@@ -45,7 +45,14 @@ function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTi
 function relative(value){if(!value)return 'Never';const seconds=Math.max(0,(Date.now()-new Date(value).getTime())/1000);if(seconds<60)return 'Just now';if(seconds<3600)return `${Math.floor(seconds/60)}m ago`;if(seconds<86400)return `${Math.floor(seconds/3600)}h ago`;return new Date(value).toLocaleDateString();}
 function date(value){return value?new Date(value).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';}
 function interval(value){return value===3600?'Hourly':value>=3600?`${value/3600} hours`:`${value/60} min`;}
-function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;securityRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;$('login-factor').hidden=true;$('login-code').required=false;$('login-code').value='';$('admin-key').value='';state=null;}
+function showLogin(){
+  clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;securityRequest++;
+  $('log-output').textContent='';$('refresh-logs').disabled=false;
+  $('workspace').hidden=true;$('login-view').hidden=false;
+  $('login-factor').hidden=true;$('login-code').disabled=true;$('login-code').required=false;
+  $('login-code').value='';$('admin-key').value='';$('login-error').textContent='';
+  $('login-submit-label').textContent='Open workspace';state=null;
+}
 function selectPage(name){
   page=name;
   document.querySelectorAll('.provider-actions[open]').forEach(menu=>menu.open=false);
@@ -464,8 +471,14 @@ $('schedule-form').addEventListener('submit',async event=>{event.preventDefault(
 $('login-form').addEventListener('submit',async event=>{
   event.preventDefault();$('login-error').textContent='';$('login-submit').disabled=true;
   try{
-    const result=await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value,code:$('login-code').value.trim()})});
-    if(result.requires_two_factor){$('login-factor').hidden=false;$('login-code').required=true;$('login-code').focus();return;}
+    // Browser autofill can restore a code even while its field is hidden.
+    const code=$('login-factor').hidden?'':$('login-code').value.trim();
+    const result=await api('/login',{method:'POST',body:JSON.stringify({token:$('admin-key').value,code})});
+    if(result.requires_two_factor){
+      $('login-code').value='';$('login-code').disabled=false;$('login-code').required=true;
+      $('login-factor').hidden=false;$('login-submit-label').textContent='Verify and open workspace';
+      $('login-code').focus();return;
+    }
     $('admin-key').value='';$('login-code').value='';await loadState();if(page==='activity')loadLogs();
     if(result.recovery_used){selectPage('settings');toast('Recovery code used. Check your remaining codes in Account security.');}
   }catch(error){$('login-error').textContent=error.message;}
