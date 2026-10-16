@@ -14,8 +14,20 @@ concurrency:
 
 jobs:
   docker-checks:
-    runs-on: ubuntu-24.04
+    name: Backend and deployment (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Check out source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -25,10 +37,15 @@ jobs:
       - name: Build development image
         run: docker build --target development -t subscription-parser:ci-dev .
 
-      - name: Run tests
-        run: >-
-          docker run --rm --read-only --tmpfs /tmp:mode=1777
-          subscription-parser:ci-dev python -m unittest discover -s tests -v
+      - name: Run all tests and enforce coverage
+        run: |
+          mkdir -p artifacts/unit
+          docker run --rm --read-only --tmpfs /tmp:mode=1777 \
+            --user "$(id -u):$(id -g)" \
+            --mount type=bind,src="$PWD/artifacts/unit",dst=/artifacts \
+            --env PARSER_TEST_ARTIFACTS=/artifacts \
+            subscription-parser:ci-dev python scripts/run_tests.py \
+            2>&1 | tee artifacts/unit/test-output.txt
 
       - name: Build production image
         run: docker build --target production -t subscription-parser:ci .
@@ -36,4 +53,58 @@ jobs:
       - name: Verify production deployment with synthetic subscriptions
         env:
           PARSER_IMAGE: subscription-parser:ci
-        run: python3 scripts/docker_smoke.py
+        run: python3 scripts/docker_smoke.py 2>&1 | tee artifacts/docker-smoke.txt
+
+      - name: Save test and coverage reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: backend-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 14
+
+  browser-checks:
+    name: Dashboard (${{ matrix.browser }})
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build browser test image
+        run: >-
+          docker build --target browser-tests
+          --build-arg TEST_BROWSERS=${{ matrix.browser }}
+          -t subscription-parser:ci-browser .
+
+      - name: Exercise the dashboard with synthetic providers
+        env:
+          PARSER_TEST_ENGINE: ${{ matrix.browser }}
+        run: |
+          mkdir -p artifacts/browser
+          # Use the image's unprivileged account and writable home for Firefox.
+          browser_container=$(docker create --shm-size=1g \
+            --env PARSER_TEST_ARTIFACTS=/app/artifacts --env PARSER_TEST_ENGINE \
+            subscription-parser:ci-browser python scripts/browser_smoke.py)
+          trap 'docker rm --force "$browser_container" >/dev/null' EXIT
+          result=0
+          docker start --attach "$browser_container" 2>&1 | tee artifacts/browser/test-output.txt || result=$?
+          docker cp "$browser_container:/app/artifacts/." artifacts/browser/
+          exit "$result"
+
+      - name: Save browser reports and failure traces
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: browser-${{ matrix.browser }}
+          path: artifacts/browser/
+          retention-days: 14

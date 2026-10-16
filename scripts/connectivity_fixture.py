@@ -1,4 +1,4 @@
-"""Local VLESS server and HTTPS origin for deterministic client-core tests."""
+"""Local proxy server and HTTPS origin for deterministic client-core tests."""
 from contextlib import contextmanager
 import http.server
 import json
@@ -13,10 +13,17 @@ import threading
 import time
 
 UUID = '01234567-89ab-4cde-8fab-0123456789ab'
+PASSWORD = 'synthetic-proxy-password'
 
 
 @contextmanager
-def fixture(folder, core, port=0):
+def fixture(folder, core, port=0, *, protocol='vless'):
+    settings = {
+        'vless': {'decryption': 'none', 'clients': [{'id': UUID}]},
+        'vmess': {'clients': [{'id': UUID, 'alterId': 0}]},
+        'shadowsocks': {'method': 'aes-128-gcm', 'password': PASSWORD, 'network': 'tcp'},
+        'trojan': {'clients': [{'password': PASSWORD}]},
+    }[protocol]
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     certificate, key = folder / 'test-ca.pem', folder / 'test-key.pem'
@@ -44,8 +51,19 @@ def fixture(folder, core, port=0):
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             port = listener.getsockname()[1]
-    document = {'log': {'loglevel': 'none'}, 'inbounds': [{'listen': '127.0.0.1', 'port': port,
-        'protocol': 'vless', 'settings': {'decryption': 'none', 'clients': [{'id': UUID}]}}],
+    inbound = {'listen': '127.0.0.1', 'port': port, 'protocol': protocol, 'settings': settings}
+    node = {'type': protocol, 'tag': 'Synthetic', 'server': '127.0.0.1', 'server_port': port}
+    if protocol in ('vless', 'vmess'):
+        node['uuid'] = UUID
+    else:
+        node['password'] = PASSWORD
+    if protocol == 'shadowsocks':
+        node['method'] = 'aes-128-gcm'
+    if protocol == 'trojan':
+        inbound['streamSettings'] = {'security': 'tls', 'tlsSettings': {
+            'certificates': [{'certificateFile': str(certificate), 'keyFile': str(key)}]}}
+        node['tls'] = {'enabled': True, 'server_name': 'localhost'}
+    document = {'log': {'loglevel': 'none'}, 'inbounds': [inbound],
         'outbounds': [{'protocol': 'freedom', 'settings': {'redirect': f'127.0.0.1:{server.server_port}'}}]}
     config = folder / 'test-server.json'
     config.write_text(json.dumps(document)); config.chmod(0o600)
@@ -56,14 +74,13 @@ def fixture(folder, core, port=0):
         deadline = time.monotonic() + 5
         while True:
             if process.poll() is not None or time.monotonic() >= deadline:
-                raise RuntimeError('local VLESS fixture did not start')
+                raise RuntimeError(f'local {protocol} fixture did not start')
             try:
                 with socket.create_connection(('127.0.0.1', port), timeout=.1):
                     break
             except OSError:
                 time.sleep(.05)
-        yield {'server': server, 'port': port, 'certificate': certificate,
-               'node': {'type': 'vless', 'tag': 'Synthetic', 'server': '127.0.0.1', 'server_port': port, 'uuid': UUID}}
+        yield {'server': server, 'port': port, 'certificate': certificate, 'node': node}
     finally:
         if process:
             process.terminate()

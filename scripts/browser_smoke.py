@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the dashboard with synthetic providers; never change live accounts."""
+from contextlib import contextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -20,6 +21,67 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def read_clipboard(page):
+    if os.environ.get('PARSER_TEST_ENGINE', 'chromium') == 'chromium':
+        return page.evaluate('navigator.clipboard.readText()')
+    # Firefox/WebKit do not support Playwright's clipboard-read permission.
+    # Await the real clipboard write; record its text only after it succeeds.
+    return page.evaluate('window.__testClipboardWrite')
+
+
+@contextmanager
+def checked_browser(checks):
+    engine = os.environ.get('PARSER_TEST_ENGINE', 'chromium')
+    if engine not in ('chromium', 'firefox', 'webkit'):
+        raise ValueError('PARSER_TEST_ENGINE must be chromium, firefox or webkit')
+    artifacts = Path(os.environ.get('PARSER_TEST_ARTIFACTS', ROOT / 'artifacts/browser' / engine))
+    artifacts.mkdir(parents=True, exist_ok=True)
+    screenshots = Path(os.environ.setdefault('PARSER_TEST_SCREENSHOTS', str(artifacts / 'screenshots')))
+    screenshots.mkdir(parents=True, exist_ok=True)
+    errors = []
+    status = 'failed'
+    browser = context = page = None
+    with sync_playwright() as browser_api:
+        try:
+            options = {'headless': True}
+            if engine == 'chromium':
+                options['args'] = ['--no-sandbox']
+            if os.environ.get('PARSER_TEST_BROWSER'):
+                options['executable_path'] = os.environ['PARSER_TEST_BROWSER']
+            browser = getattr(browser_api, engine).launch(**options)
+            context = browser.new_context(viewport={'width': 1440, 'height': 1000},
+                permissions=['clipboard-read', 'clipboard-write'] if engine == 'chromium' else [])
+            context.tracing.start(screenshots=True, snapshots=True, sources=True)
+            if engine != 'chromium':
+                context.add_init_script('''
+                    const write = navigator.clipboard.writeText.bind(navigator.clipboard);
+                    navigator.clipboard.writeText = text => {
+                        window.__testClipboardWrite = write(text).then(() => String(text));
+                        return window.__testClipboardWrite.then(() => undefined);
+                    };
+                ''')
+            page = context.new_page()
+            page.on('pageerror', lambda error: errors.append(str(error)))
+            yield page, errors
+            status = 'passed'
+        except BaseException:
+            if page:
+                with suppress(Exception):
+                    page.screenshot(path=str(artifacts / 'failure.png'), full_page=True, timeout=5000)
+            raise
+        finally:
+            if context:
+                with suppress(Exception):
+                    context.tracing.stop(path=str(artifacts / 'trace.zip') if status == 'failed' else None)
+            if browser:
+                browser.close()
+            report = {'tested_at': common.now(), 'browser': engine, 'status': status,
+                      'checks': checks, 'passed': len(checks), 'page_errors': errors,
+                      'clipboard_check': 'native-readback' if engine == 'chromium' else 'successful-write-capture'}
+            common.atomic_write(artifacts / 'report.json', common.json_text(report))
+            print(json.dumps(report, indent=2))
+
+
 def main():
     os.umask(0o077)
     checks = []
@@ -27,6 +89,7 @@ def main():
         root = Path(temporary)
         seen = []
         failed_nodes = set()
+        failed_checks = set()
         def fetch(url, hwid, user_agent, timeout):
             seen.append(hwid)
             return json.dumps([{'outbounds': [
@@ -40,8 +103,8 @@ def main():
         with patch.dict(os.environ, {'PARSER_ADMIN_TOKEN': admin}):
             def checker(entries, root, **kwargs):
                 return connectivity.check_entries(entries, root, **kwargs,
-                    tester=lambda node, *args: {'status': 'failed', 'reason': 'HTTPS check failed'}
-                    if node.name in failed_nodes else {'status': 'passed', 'latency_ms': 12})
+                    tester=lambda node, core, *args: {'status': 'failed', 'reason': 'HTTPS check failed'}
+                    if node.name in failed_nodes or (node.name, core) in failed_checks else {'status': 'passed', 'latency_ms': 12})
             app = create_app(root, start_scheduler=False, fetcher=fetch, checker=checker)
         manager = app.state.manager
         with socket.socket() as sock:
@@ -56,15 +119,7 @@ def main():
         if not server.started:
             raise RuntimeError('test server did not start')
         try:
-            with sync_playwright() as browser_api:
-                options = {'headless': True, 'args': ['--no-sandbox']}
-                if os.environ.get('PARSER_TEST_BROWSER'):
-                    options['executable_path'] = os.environ['PARSER_TEST_BROWSER']
-                browser = browser_api.chromium.launch(**options)
-                context = browser.new_context(viewport={'width':1440, 'height':1000}, permissions=['clipboard-read', 'clipboard-write'])
-                page = context.new_page()
-                errors = []
-                page.on('pageerror', lambda error: errors.append(str(error)))
+            with checked_browser(checks) as (page, errors):
                 page.goto(f'http://127.0.0.1:{port}')
                 page.locator('#admin-key').fill('wrong-admin-key')
                 page.locator('#login-form button').click()
@@ -107,6 +162,10 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
+                for row in page.locator('#provider-rows tr').all():
+                    expect(row.locator('.server-count')).to_have_text('2')
+                    expect(row.locator('.provider-working')).to_have_text('0 working')
+                    expect(row.locator('.provider-check-note')).to_have_text('Awaiting checks')
                 page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#check-servers').click()
                 expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
@@ -122,6 +181,81 @@ def main():
                 expect(page.locator('#stat-servers')).to_have_text('2', timeout=15000)
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 checks.append('explicit per-link devices, test-before-save and reuse of tested responses')
+
+                for row in page.locator('#provider-rows tr').all():
+                    expect(row.locator('.provider-working')).to_have_text('2 working')
+                    expect(row.locator('.provider-client-counts strong')).to_have_text(['2'] * 5)
+                    expect(row.locator('.provider-client-counts')).not_to_be_visible()
+                first_row = page.locator('#provider-rows tr').first
+                first_row.locator('.provider-client-details summary').focus()
+                page.keyboard.press('Enter')
+                expect(first_row.locator('.provider-client-counts')).to_be_visible()
+                page.evaluate('loadState()')
+                expect(first_row.locator('.provider-client-counts')).to_be_visible()
+                expect(first_row.locator('.provider-client-details summary')).to_be_focused()
+                first_row.locator('.provider-actions summary').focus()
+                page.keyboard.press('Enter')
+                page.keyboard.press('Tab')
+                expect(first_row.locator('[data-action=refresh]')).to_be_focused()
+                page.evaluate('loadState()')
+                expect(first_row.locator('[data-action=refresh]')).to_be_focused()
+                page.keyboard.press('Escape')
+                expect(first_row.locator('.provider-actions summary')).to_be_focused()
+                expect(first_row.locator('.action-menu-items')).not_to_be_visible()
+                first_row.locator('.provider-actions summary').click()
+                page.locator('#page-title').click()
+                expect(first_row.locator('.action-menu-items')).not_to_be_visible()
+                checks.append('provider details and actions stay usable through polling, keyboard navigation and outside clicks')
+                valid_until = manager.snapshot['valid_until']
+                manager.snapshot['valid_until'] = time.time() - 1
+                page.reload()
+                expect(page.locator('#provider-rows tr')).to_have_count(2)
+                for row in page.locator('#provider-rows tr').all():
+                    expect(row.locator('.provider-working')).to_have_text('0 working')
+                    expect(row.locator('.server-count')).to_have_text('2')
+                    expect(row.locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
+                    expect(row.locator('.provider-check-note')).to_have_text('Checks expired')
+                manager.snapshot['valid_until'] = valid_until
+                page.reload()
+                expect(page.locator('#provider-rows tr').first.locator('.provider-working')).to_have_text('2 working')
+                page.locator('.nav-item[data-page=providers]').click()
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-desktop.png',full_page=True)
+                page.set_viewport_size({'width':390,'height':844})
+                assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                assert page.locator('#providers-section .table-scroll').evaluate('el => el.scrollWidth <= el.clientWidth')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-mobile.png',full_page=True)
+                first_row.locator('.provider-client-details summary').click()
+                expect(first_row.locator('.provider-client-counts')).to_be_visible()
+                first_row.locator('.provider-actions summary').click()
+                expect(first_row.locator('[data-action=edit]')).to_be_in_viewport()
+                assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                    page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-expanded-mobile.png',full_page=True)
+                page.keyboard.press('Escape')
+                first_row.locator('.provider-client-details summary').click()
+                page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.provider-working').click()
+                expect(page.locator('#page-title')).to_have_text('Server library')
+                expect(page.locator('#provider-filter option:checked')).to_have_text('Demo 2')
+                expect(page.locator('#connection-filter')).to_have_value('passing')
+                expect(page.locator('#server-rows tr')).to_have_count(2)
+                page.set_viewport_size({'width':1440,'height':1000})
+                failed_checks.add(('Tokyo', 'xray'))
+                page.locator('#check-servers').click()
+                expect(page.locator('#check-servers')).to_be_enabled(timeout=15000)
+                page.locator('.nav-item[data-page=providers]').click()
+                for row in page.locator('#provider-rows tr').all():
+                    expect(row.locator('.provider-working')).to_have_text('2 working')
+                    expect(row.locator('.provider-client-counts strong')).to_have_text(['2', '2', '1', '2', '2'])
+                failed_checks.clear()
+                page.locator('.nav-item[data-page=servers]').click()
+                page.locator('#provider-filter').select_option('')
+                page.locator('#connection-filter').select_option('')
+                page.locator('#check-servers').click()
+                expect(page.locator('#server-rows tr').nth(1).locator('td').nth(4)).to_contain_text('Passed',timeout=15000)
+                assert len(seen)==2
+                checks.append('provider working totals, shared nodes, per-client results, pending/expired checks and mobile drill-down')
 
                 page.locator('.nav-item[data-page=devices]').click()
                 first=page.locator('[data-device="'+identities['Browser device']+'"]')
@@ -139,7 +273,7 @@ def main():
                 expect(page.locator('#device-revealed-value')).to_have_value('saved-browser-hwid')
                 page.locator('#copy-revealed-device').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
-                assert page.evaluate('navigator.clipboard.readText()')=='saved-browser-hwid'
+                assert read_clipboard(page)=='saved-browser-hwid'
                 page.locator('#device-reveal-dialog [data-close]').first.click()
                 expect(page.locator('#device-revealed-value')).to_have_value('')
                 checks.append('device usage, rename without ID changes and private reveal/copy/hide')
@@ -173,6 +307,7 @@ def main():
                 page.locator('.nav-item[data-page=providers]').click()
                 no_device=page.locator('#provider-rows tr').filter(has_text='No device provider')
                 expect(no_device).to_contain_text('No device ID')
+                no_device.locator('.provider-actions summary').click()
                 page.once('dialog',lambda dialog:dialog.accept())
                 no_device.locator('[data-action=delete]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
@@ -197,6 +332,10 @@ def main():
                 expect(page.locator('#server-rows')).to_contain_text('Tokyo')
                 expect(page.locator('#server-rows')).to_contain_text('Failed')
                 expect(page.locator('#connection-summary')).to_contain_text('1 excluded')
+                page.locator('.nav-item[data-page=providers]').click()
+                expect(page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.provider-working')).to_have_text('1 working')
+                expect(page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.server-count')).to_have_text('2')
+                page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#connection-filter').select_option('')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/servers-desktop.png',full_page=True)
@@ -213,7 +352,7 @@ def main():
                 page.locator('.nav-item[data-page=exports]').click()
                 page.locator('[data-copy="hiddify.json"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
-                copied = page.evaluate('navigator.clipboard.readText()')
+                copied = read_clipboard(page)
                 response = page.request.get(copied)
                 assert response.status == 200
                 assert len(response.json()['outbounds']) == 2
@@ -221,7 +360,7 @@ def main():
 
                 page.locator('[data-copy="v2board.json"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
-                native_link = page.evaluate('navigator.clipboard.readText()')
+                native_link = read_clipboard(page)
                 response = page.request.get(native_link)
                 assert response.status == 200
                 assert response.json()['format'] == 'subscription-parser'
@@ -230,7 +369,7 @@ def main():
 
                 page.locator('[data-copy="v2board.txt"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
-                v2board_link = page.evaluate('navigator.clipboard.readText()')
+                v2board_link = read_clipboard(page)
                 response = page.request.get(v2board_link)
                 assert response.status == 200
                 assert response.headers['content-type'].startswith('text/plain')
@@ -258,7 +397,7 @@ def main():
                 phone_id = page.locator('#subscription-list [aria-current=true]').get_attribute('data-subscription-id')
                 expect(page.locator('#subscription-summary')).to_contain_text('2 of 2 servers included')
                 page.locator('[data-copy="combined.json"]').click()
-                phone_link = page.evaluate('navigator.clipboard.readText()')
+                phone_link = read_clipboard(page)
                 phone_archive = page.request.get(phone_link).json()
                 assert {source for node in phone_archive['servers'] for source in node['sources']} == {providers[0]['name']}
                 page.locator('#edit-subscription').click()
@@ -278,7 +417,7 @@ def main():
                 family_id = page.locator('#subscription-list [aria-current=true]').get_attribute('data-subscription-id')
                 expect(page.locator('#subscription-total')).to_have_text('3')
                 page.locator('[data-copy="v2board.txt"]').click()
-                family_link = page.evaluate('navigator.clipboard.readText()')
+                family_link = read_clipboard(page)
                 assert family_link != legacy_link
                 page.locator('#subscription-search').fill('my phone')
                 expect(page.locator('#subscription-list > li')).to_have_count(1)
@@ -347,6 +486,7 @@ def main():
                 checks.append('mobile list and detail navigation, keyboard selection and searchable provider choices')
 
                 page.locator('.nav-item[data-page=providers]').click()
+                page.locator('.provider-actions summary').first.click()
                 page.locator('[data-action=edit]').first.click()
                 page.locator('#provider-name').fill('Renamed provider')
                 page.locator('#save-provider').click()
@@ -354,8 +494,12 @@ def main():
                 expect(page.locator('#provider-rows')).to_contain_text('Renamed provider')
                 expect(page.locator('#refresh-button')).to_be_enabled(timeout=15000)
                 paused_provider=page.locator('#provider-rows tr').filter(has_text='Demo 2')
+                paused_provider.locator('.provider-actions summary').click()
                 paused_provider.locator('[data-action=toggle]').click()
                 expect(paused_provider).to_contain_text('Paused')
+                expect(paused_provider.locator('.provider-working')).to_have_text('0 working')
+                expect(paused_provider.locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
+                paused_provider.locator('.provider-actions summary').click()
                 page.once('dialog', lambda dialog: dialog.accept())
                 paused_provider.locator('[data-action=delete]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(1)
@@ -457,7 +601,7 @@ def main():
                 assert len(recovery) == 10
                 expect(page.locator('#security-secret')).to_have_value('')
                 page.locator('#copy-recovery').click()
-                assert page.evaluate('navigator.clipboard.readText()') == '\n'.join(recovery)
+                assert read_clipboard(page) == '\n'.join(recovery)
                 for width in (320, 390, 1440):
                     page.set_viewport_size({'width':width, 'height':1000})
                     assert page.evaluate('document.body.scrollWidth <= innerWidth')
@@ -531,13 +675,9 @@ def main():
                 expect(page.locator('#login-error')).to_contain_text('seconds')
                 checks.append('login throttling shows a clear retry time without opening the dashboard')
                 assert not errors, errors
-                browser.close()
         finally:
             server.should_exit = True
             thread.join(timeout=10)
-    report = {'tested_at':common.now(), 'checks':checks, 'passed':len(checks), 'page_errors':[]}
-    common.atomic_write(ROOT / '.parser-state/browser-check.json', common.json_text(report))
-    print(json.dumps(report, indent=2))
 
 
 if __name__ == '__main__':

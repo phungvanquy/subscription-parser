@@ -37,10 +37,20 @@ FROM application AS development
 USER root
 COPY requirements-dev.txt ./
 RUN pip install --no-cache-dir -r requirements-dev.txt
+COPY --chown=10001:10001 .coveragerc ./
 COPY --chown=10001:10001 tests ./tests
 COPY --chown=10001:10001 scripts/install_client_cores.py scripts/client-cores.lock.json ./scripts/
 COPY --chown=10001:10001 scripts/browser_smoke.py ./scripts/browser_smoke.py
 COPY --chown=10001:10001 scripts/connectivity_fixture.py ./scripts/connectivity_fixture.py
+COPY --chown=10001:10001 scripts/run_tests.py ./scripts/run_tests.py
+USER parser
+
+FROM development AS browser-tests
+USER root
+ARG TEST_BROWSERS="chromium firefox webkit"
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN python -m playwright install --with-deps ${TEST_BROWSERS} \
+    && rm -rf /var/lib/apt/lists/*
 USER parser
 
 FROM application AS production

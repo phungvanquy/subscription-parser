@@ -1,5 +1,4 @@
-"""Actual client-core traffic through a local VLESS + HTTPS fixture; no Internet."""
-import copy
+"""Actual client-core traffic through local proxy + HTTPS fixtures; no Internet."""
 import json
 import os
 from pathlib import Path
@@ -19,12 +18,14 @@ CORES = Path(os.environ.get('PARSER_TOOLS_DIR', '/opt/client-cores'))
 @unittest.skipUnless(all((CORES / ('hiddify-core' if core == 'hiddify' else core)).is_file() for core in c.CORES),
                      'Docker image with client cores required')
 class RealCoreTests(unittest.TestCase):
+    protocol = 'vless'
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         (self.root / '.parser-state').mkdir()
-        manager = fixture(self.root / 'fixture', CORES / 'xray')
+        manager = fixture(self.root / 'fixture', CORES / 'xray', protocol=self.protocol)
         self.local = manager.__enter__()
         self.addCleanup(manager.__exit__, None, None, None)
         env = patch.dict(os.environ, {'PARSER_TOOLS_DIR': str(CORES),
@@ -58,9 +59,11 @@ class RealCoreTests(unittest.TestCase):
         self.assertEqual(self.local['server'].requests, 0)
 
     def test_wrong_credentials_fail_actual_handshake(self):
+        credential = {'uuid': '11234567-89ab-4cde-8fab-0123456789ab'} if 'uuid' in self.local['node'] else {
+            'password': 'wrong-proxy-password'}
         for core in c.CORES:
             with self.subTest(core=core), patch.object(c, 'REQUEST_TIMEOUT', 1):
-                value = self.probe(self.node(uuid='11234567-89ab-4cde-8fab-0123456789ab'), core)
+                value = self.probe(self.node(**credential), core)
                 self.assertEqual(value['status'], 'failed', value)
         self.assertEqual(self.local['server'].requests, 0)
 
@@ -74,3 +77,15 @@ class RealCoreTests(unittest.TestCase):
             with self.subTest(core=core):
                 self.assertEqual(self.probe(self.node(), core)['status'], 'failed')
         self.assertEqual(self.local['server'].requests, 2 * len(c.CORES))
+
+
+class VMessCoreTests(RealCoreTests):
+    protocol = 'vmess'
+
+
+class ShadowsocksCoreTests(RealCoreTests):
+    protocol = 'shadowsocks'
+
+
+class TrojanCoreTests(RealCoreTests):
+    protocol = 'trojan'

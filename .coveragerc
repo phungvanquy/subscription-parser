@@ -1,0 +1,9 @@
+[run]
+branch = True
+source = subscription_parser
+relative_files = True
+
+[report]
+fail_under = 85
+precision = 2
+show_missing = True

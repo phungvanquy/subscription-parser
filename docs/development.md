@@ -44,10 +44,33 @@ docker build --target development -t subscription-parser:test .
 docker run --rm --read-only --tmpfs /tmp:mode=1777 subscription-parser:test python -m unittest discover -s tests -v
 ```
 
+Use the same coverage gate as CI, saving reports outside the container:
+
+```sh
+mkdir -p artifacts/unit
+docker run --rm --read-only --tmpfs /tmp:mode=1777 \
+  --user "$(id -u):$(id -g)" \
+  --mount type=bind,src="$PWD/artifacts/unit",dst=/artifacts \
+  --env PARSER_TEST_ARTIFACTS=/artifacts \
+  subscription-parser:test python scripts/run_tests.py
+```
+
+The full-suite runner fails on test failures, skipped tests, or combined statement
+and branch coverage below **85%**, configured in [`.coveragerc`](../.coveragerc).
+It writes a test summary plus XML, JSON, and HTML coverage reports to
+`artifacts/unit/`. Keep this minimum at or above its current value as coverage
+improves; do not lower it to accommodate untested changes. The coverage report
+measures Python application code; browser checks separately exercise JavaScript.
+
 The suite covers parsing and conversion, protocol compatibility, fetch behavior,
 storage migrations, subscription selection, logs, authentication, and connection
 checks. Security cases include code replay, session revocation, recovery, proxy
-header handling, rate limits, and persistence.
+header handling, rate limits, and persistence. Download cases include HTTPS
+redirects and downgrade rejection, response size boundaries, bounded retries,
+network/TLS failures, timeouts, and private URL redaction. Actual Mihomo, Xray,
+and Hiddify processes tunnel HTTPS through local VLESS, VMess, Shadowsocks, and
+Trojan fixtures, including rejected credentials, dead servers, invalid TLS,
+unexpected HTTP responses, and process cleanup.
 
 ### Production-container checks
 
@@ -62,23 +85,47 @@ PARSER_IMAGE=subscription-parser:smoke python3 scripts/docker_smoke.py
 The script creates an isolated Compose project with synthetic credentials and a
 temporary volume. It checks migration, HWIDs, all six output formats, proxy
 headers, scoped subscriptions, token rotation, authentication, and container
-replacement. Real Mihomo/Xray checks run through a local VLESS fixture and HTTPS
+replacement. Real Mihomo/Xray/Hiddify checks run through a local VLESS fixture and HTTPS
 origin with a temporary certificate. The script removes its own test resources.
 
 ### Browser checks
 
-Run the optional Playwright checks in a disposable container:
+Run Playwright checks in a disposable container:
 
 ```sh
-docker build --target development -t subscription-parser:browser-test .
-docker run --rm --user 0 subscription-parser:browser-test sh -c 'python -m playwright install --with-deps chromium && python scripts/browser_smoke.py'
+docker build --target browser-tests -t subscription-parser:browser-test .
+mkdir -p artifacts/browser/chromium
+browser_container=$(docker create --shm-size=1g \
+  --env PARSER_TEST_ARTIFACTS=/app/artifacts --env PARSER_TEST_ENGINE=chromium \
+  subscription-parser:browser-test python scripts/browser_smoke.py)
+trap 'docker rm --force "$browser_container" >/dev/null' EXIT
+result=0
+docker start --attach "$browser_container" || result=$?
+docker cp "$browser_container:/app/artifacts/." artifacts/browser/chromium/
+docker rm "$browser_container"
+trap - EXIT
+test "$result" -eq 0
 ```
 
 The browser checks use synthetic providers and cover desktop/mobile navigation,
 provider and HWID workflows, named subscriptions, exports, schedules, logs,
-authenticator setup, recovery, and login throttling. They do not change the live
-deployment. `PARSER_TEST_BROWSER` can select an existing Chromium executable;
-`PARSER_TEST_SCREENSHOTS` can point to a writable output directory.
+authenticator setup, recovery, and login throttling. Provider checks include
+working/client counts, shared servers, pending/expired/failed checks, action menus,
+keyboard focus during polling, and mobile filtering. They do not change the live
+deployment.
+
+Repeat with `PARSER_TEST_ENGINE=firefox` or `webkit` and separate artifact folders.
+The image's unprivileged user has the writable home Firefox requires. Results are
+copied out of the disposable container without changing host file ownership.
+All three engines run the same workflows. Chromium reads back the real clipboard;
+Firefox/WebKit capture the copied text after the real clipboard write succeeds,
+because they do not support Playwright's clipboard-read permission. A JSON report
+and screenshots are saved for each run; failures also save `failure.png` and a
+Playwright `trace.zip`. Open a trace with `python -m playwright show-trace PATH`.
+
+`PARSER_TEST_BROWSER` selects an existing executable for the selected engine.
+`PARSER_TEST_SCREENSHOTS` overrides the screenshot directory. To install only one
+engine in the test image, pass `--build-arg TEST_BROWSERS=chromium` when building.
 
 ## Continuous integration
 
@@ -86,13 +133,19 @@ deployment. `PARSER_TEST_BROWSER` can select an existing Chromium executable;
 runs on pushes, pull requests, and manual dispatch. The
 [workflow](../.github/workflows/ci.yml) uses Ubuntu 24.04 and:
 
-1. Builds the development image.
-2. Runs the Python test suite.
-3. Builds the production image.
-4. Runs isolated Docker deployment checks.
+1. Builds development images on native **amd64 and ARM64** runners.
+2. Runs the full Python suite on both architectures, requires zero skips, and
+   enforces the coverage minimum.
+3. Builds production images and runs isolated Docker deployment checks on both
+   architectures.
+4. Runs the dashboard suite in **Chromium, Firefox, and WebKit** on amd64.
+5. Uploads test logs, coverage reports, screenshots, and failure traces as Actions
+   artifacts, retained for 14 days, including when a check fails.
 
 CI uses synthetic data and needs no production `.env`, HWIDs, or repository
-secrets. Browser checks are currently a separate, optional local check.
+secrets. Local proxy fixtures cover representative TCP/TLS configurations, not
+every protocol/transport combination or live provider behavior. Mobile checks
+exercise responsive layouts in desktop engines, not physical phones.
 
 ## Project structure
 

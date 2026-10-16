@@ -3,6 +3,7 @@
 !Dockerfile
 !requirements.txt
 !requirements-dev.txt
+!.coveragerc
 !.env.example
 !subscription_parser/
 !subscription_parser/**
@@ -12,6 +13,7 @@
 !scripts/import_state.py
 !scripts/browser_smoke.py
 !scripts/connectivity_fixture.py
+!scripts/run_tests.py
 !tests/
 !tests/**
 **/__pycache__/
