@@ -1,4 +1,4 @@
-"""Actual Mihomo/Xray traffic through a local VLESS + HTTPS fixture; no Internet."""
+"""Actual client-core traffic through a local VLESS + HTTPS fixture; no Internet."""
 import copy
 import json
 import os
@@ -16,7 +16,8 @@ from subscription_parser import connectivity as c, protocols
 CORES = Path(os.environ.get('PARSER_TOOLS_DIR', '/opt/client-cores'))
 
 
-@unittest.skipUnless(all((CORES / core).is_file() for core in c.CORES), 'Docker image with client cores required')
+@unittest.skipUnless(all((CORES / ('hiddify-core' if core == 'hiddify' else core)).is_file() for core in c.CORES),
+                     'Docker image with client cores required')
 class RealCoreTests(unittest.TestCase):
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -38,13 +39,13 @@ class RealCoreTests(unittest.TestCase):
     def probe(self, node, core, **kwargs):
         return c.probe(node, core, self.root, threading.Event(), time.monotonic()+15, **kwargs)
 
-    def test_both_real_cores_tunnel_verified_https_and_cleanup(self):
+    def test_all_real_cores_tunnel_verified_https_and_cleanup(self):
         for core in c.CORES:
             with self.subTest(core=core):
                 value = self.probe(self.node(), core)
                 self.assertEqual(value['status'], 'passed', value)
                 self.assertGreater(value['latency_ms'], 0)
-        self.assertEqual(self.local['server'].requests, 2)
+        self.assertEqual(self.local['server'].requests, len(c.CORES))
         self.assertFalse(list((self.root / '.parser-state').iterdir()))
 
     def test_dead_node_never_falls_back_to_direct(self):
@@ -72,4 +73,4 @@ class RealCoreTests(unittest.TestCase):
         for core in c.CORES:
             with self.subTest(core=core):
                 self.assertEqual(self.probe(self.node(), core)['status'], 'failed')
-        self.assertEqual(self.local['server'].requests, 4)
+        self.assertEqual(self.local['server'].requests, 2 * len(c.CORES))

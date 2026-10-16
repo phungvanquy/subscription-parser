@@ -15,7 +15,7 @@ or more providers and has its own stable import links.
   number of named output subscriptions, with independent provider selections.
 - **Protocol-aware conversion.** Import JSON, YAML, and plain or base64 share
   links. Preserve supported protocols, credentials, and transport settings.
-- **Automatic connection checks.** Test through Mihomo and Xray, then publish
+- **Automatic connection checks.** Test through Mihomo, Xray and Hiddify, then publish
   only compatible nodes with recent passing results.
 - **Fixed device identities.** Store authorized HWIDs in the data volume and
   explicitly assign them to providers.
@@ -83,7 +83,7 @@ See [formats and compatibility](docs/usage.md#formats-and-compatibility).
 flowchart LR
     A[Provider subscriptions] --> B[Fetch and cache]
     B --> C[Convert and validate]
-    C --> D[Mihomo and Xray checks]
+    C --> D[Mihomo, Xray and Hiddify checks]
     D --> E[Select providers and passing nodes]
     E --> F[Private client feeds]
 ```

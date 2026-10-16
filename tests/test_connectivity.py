@@ -38,8 +38,15 @@ class ConnectivityTests(unittest.TestCase):
 
     def test_core_results_are_independent_and_unknown_never_passes(self):
         results = self.records(lambda node, core, *args: c.result('passed', latency_ms=10) if core == 'xray' else c.result('failed'))
-        self.assertEqual(set(c.filtered_entries(self.nodes, results, 1200)[0].outputs), {'hiddify', 'xray'})
+        self.assertEqual(set(c.filtered_entries(self.nodes, results, 1200)[0].outputs), {'xray'})
         self.assertTrue(all(not node.outputs for node in c.filtered_entries(self.nodes, {}, 1200)))
+
+    def test_hiddify_requires_its_own_current_success(self):
+        results = self.records()
+        results[self.nodes[0].identity].pop('hiddify')
+        self.assertNotIn('hiddify', c.filtered_entries(self.nodes, results, 1200)[0].outputs)
+        results = self.records(lambda node, core, *args: c.result('passed') if core == 'hiddify' else c.result('failed'))
+        self.assertEqual(set(c.filtered_entries(self.nodes, results, 1200)[0].outputs), {'hiddify'})
 
     def test_changed_credentials_conversion_or_dependency_cannot_reuse_health(self):
         results = self.records()
@@ -69,7 +76,7 @@ class ConnectivityTests(unittest.TestCase):
             calls.append(True)
             raise RuntimeError('secret-password private-subscription-url')
         values = c.check_entries([self.nodes[0], self.nodes[0]], self.root, tester=tester)
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 3)
         self.assertNotIn('secret-password', json.dumps(values))
         self.assertTrue(all(v['status'] == 'error' for v in values[self.nodes[0].identity].values()))
 
@@ -80,6 +87,21 @@ class ConnectivityTests(unittest.TestCase):
         self.assertTrue(all(v['status'] == 'pending' for row in values.values() for v in row.values()))
         self.assertFalse(c.filtered_entries(self.nodes, values, 1200)[0].outputs)
 
+    def test_deferred_jobs_keep_only_matching_passes_without_extending_their_expiry(self):
+        previous = self.records()
+        with patch.object(c, 'BATCH_TIMEOUT', 0):
+            values = c.check_entries(self.nodes, self.root, previous=previous,
+                                    tester=lambda *args: self.fail('must not probe'))
+        self.assertEqual(values[self.nodes[0].identity], previous[self.nodes[0].identity])
+        self.assertTrue(all(v['status'] == 'pending' for v in values[self.nodes[1].identity].values()))
+        future = max(v['checked_ts'] for v in values[self.nodes[0].identity].values()) + 1201
+        self.assertFalse(c.filtered_entries(self.nodes, values, 1200, now=future)[0].outputs)
+        changed = copy.deepcopy(self.nodes[0])
+        changed.outputs['hiddify']['server_port'] = 8443
+        with patch.object(c, 'BATCH_TIMEOUT', 0):
+            changed_values = c.check_entries([changed], self.root, previous=previous)
+        self.assertEqual(changed_values[changed.identity]['hiddify']['status'], 'pending')
+
     def test_probe_configs_bind_only_to_loopback_and_route_to_exact_node(self):
         xray = c.configuration(self.nodes[0], 'xray', 24680)
         self.assertEqual(xray['inbounds'][0]['listen'], '127.0.0.1')
@@ -89,6 +111,11 @@ class ConnectivityTests(unittest.TestCase):
         self.assertFalse(mihomo['allow-lan'])
         self.assertEqual(mihomo['bind-address'], '127.0.0.1')
         self.assertEqual(mihomo['rules'], ['MATCH,probe'])
+        hiddify = c.configuration(self.nodes[0], 'hiddify', 24682)
+        self.assertEqual(hiddify['inbounds'][0]['listen'], '127.0.0.1')
+        self.assertEqual(hiddify['route']['final'], 'probe')
+        self.assertEqual(hiddify['route']['rules'], [{'inbound': ['probe-in'], 'action': 'route', 'outbound': 'probe'}])
+        self.assertFalse(any(node.get('type') == 'direct' for node in hiddify['outbounds']))
 
 
 class ConnectivityWebTests(unittest.TestCase):

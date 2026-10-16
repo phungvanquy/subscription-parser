@@ -66,7 +66,12 @@ def vless_link(outbound: dict, label: str) -> str:
     elif network == "grpc":
         settings = stream.get("grpcSettings", {})
         reject_extra(settings, {"serviceName", "authority", "mode", "multiMode"}, "gRPC")
-        params["serviceName"] = settings.get("serviceName", "")
+        service_name = settings.get("serviceName")
+        if service_name is None:
+            service_name = ""
+        if not isinstance(service_name, str):
+            raise SubscriptionError("gRPC serviceName must be a string or null")
+        params["serviceName"] = service_name
         # Xray JSON uses multiMode, not the share-link query field named mode.
         # Dendiplay emits a boolean mode field, which Xray itself ignores.
         if "multiMode" in settings and not isinstance(settings["multiMode"], bool):

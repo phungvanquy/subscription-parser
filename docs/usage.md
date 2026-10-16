@@ -198,7 +198,7 @@ Connection checks run after refreshes and every **10 minutes** by default, using
 cached configurations. Change the interval under **Settings → Connection checks**.
 **Check servers** starts the same check without fetching providers or sending HWIDs.
 
-For each compatible configuration, an isolated Mihomo or Xray process sends an
+For each compatible configuration, an isolated Mihomo, Xray or Hiddify process sends an
 HTTPS request through the node. The request must pass TLS verification and return
 HTTP 204. The first probe is `https://www.gstatic.com/generate_204`; failures are
 retried against `https://cp.cloudflare.com/generate_204`. There is no direct
@@ -209,12 +209,15 @@ the test processes and configurations after use.
 | --- | --- |
 | Mihomo | Recent passing Mihomo check for the exact configuration and dependencies. |
 | Xray | Recent passing Xray check for the exact configuration and dependencies. |
-| Hiddify / V2Board URI | Compatible conversion and a recent passing check through at least one of those cores. |
-| V2Board JSON | Passing native variants only; Mihomo/Xray variants require their own core's passing check. Hiddify requires at least one compatible passing core. |
+| Hiddify | Recent passing Hiddify core check for the exact configuration and dependencies. |
+| V2Board URI | Portable conversion of a node with a recent passing core check. |
+| V2Board JSON | Each included native variant requires its own core's passing check. |
 
-Hiddify and V2Board are not tested as running client applications. Their behavior
-can differ from the Mihomo/Xray result. Native Hiddify-only configurations without
-a compatible passing check are excluded from publication.
+The checks exercise client cores, not every desktop or mobile app's importer.
+URI clients can interpret optional settings differently, and newer app versions
+can bundle different cores. Import the native JSON or YAML format when available.
+The dashboard shows a separate result for each core. A passing Xray result does
+not make a failing Hiddify variant eligible for publication.
 
 Results expire after **twice the configured check interval**. Changes to a
 configuration or its dependencies invalidate its previous result. A feed returns

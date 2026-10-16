@@ -28,11 +28,12 @@ Xray's `streamSettings.sockopt.dialerProxy`.
 References stay within the bundle. V2Board renames them together to prevent
 collisions with other sources and managed nodes.
 
-`checks` records Mihomo/Xray status and, when available, `checked_at`,
+`checks` records Mihomo/Xray/Hiddify status and, when available, `checked_at`,
 `latency_ms`, and a sanitized `reason`. Every published node needs a current
-passing check. Mihomo and Xray configurations are included only when their own
-core passed the exact configuration. Hiddify needs a compatible passing check
-through either core; this is not a separate Hiddify connection test.
+passing check. Each native configuration is included only when its own core
+passed the exact configuration and dependencies. Older version-1 feeds may omit
+the independent Hiddify result; updated V2Board importers accept those feeds for
+compatibility, but enforce a Hiddify result whenever it is supplied.
 
 `notes` preserves conversion limitations. It is not an instruction to recreate
 an excluded output. V2Board does not regenerate missing native formats from the

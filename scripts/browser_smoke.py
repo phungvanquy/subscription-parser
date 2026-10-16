@@ -111,6 +111,8 @@ def main():
                 page.locator('#check-servers').click()
                 expect(page.locator('#connection-summary')).to_contain_text('2 of 2 nodes included',timeout=15000)
                 expect(page.locator('#server-rows')).to_contain_text('Passed')
+                expect(page.get_by_role('columnheader', name='HIDDIFY CHECK')).to_have_count(1)
+                expect(page.locator('#server-rows tr').first.locator('td').nth(5)).to_contain_text('Passed')
                 expect(page.locator('#server-total')).to_have_text('2')
                 expect(page.locator('#protocol-filter')).not_to_contain_text('LOOPBACK')
                 expect(page.locator('#connection-summary')).to_contain_text('0 excluded')

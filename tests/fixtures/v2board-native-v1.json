@@ -76,6 +76,11 @@
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
+        },
+        "hiddify": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
         }
       }
     },
@@ -148,6 +153,11 @@
           "latency_ms": 12
         },
         "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "hiddify": {
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
@@ -249,6 +259,11 @@
           "latency_ms": 12
         },
         "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "hiddify": {
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
@@ -356,6 +371,11 @@
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
+        },
+        "hiddify": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
         }
       }
     },
@@ -436,6 +456,11 @@
           "latency_ms": 12
         },
         "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "hiddify": {
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
@@ -522,6 +547,11 @@
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
+        },
+        "hiddify": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
         }
       }
     },
@@ -605,6 +635,11 @@
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12
+        },
+        "hiddify": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
         }
       }
     },
@@ -677,6 +712,11 @@
           "latency_ms": 12
         },
         "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "hiddify": {
           "status": "passed",
           "checked_at": "2026-01-01T00:00:00+00:00",
           "latency_ms": 12

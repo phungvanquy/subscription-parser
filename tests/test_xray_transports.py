@@ -32,6 +32,18 @@ def query(uri):
 
 
 class TransportTests(unittest.TestCase):
+    def test_null_grpc_service_name_uses_the_empty_default(self):
+        out = outbound('grpc')
+        out['settings']['vnext'][0]['users'][0].pop('flow')
+        out['streamSettings']['grpcSettings'] = {'serviceName': None}
+        self.assertEqual(query(xt.vless_link(out, 'grpc'))['serviceName'], '')
+        native, _ = xt.hiddify_outbound(out, 'grpc')
+        self.assertEqual(native['transport']['service_name'], '')
+        for invalid in (False, 12, ['service']):
+            out['streamSettings']['grpcSettings']['serviceName'] = invalid
+            with self.assertRaises(xt.SubscriptionError):
+                xt.vless_link(out, 'grpc')
+
     def test_reality_credentials_and_reserved_characters_round_trip(self):
         uri = xt.vless_link(outbound(), "🇩🇪 Germany & fast #1")
         parsed = urllib.parse.urlsplit(uri)

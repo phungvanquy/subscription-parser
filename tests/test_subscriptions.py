@@ -114,11 +114,11 @@ class SubscriptionTests(unittest.TestCase):
         # Equivalent selections reuse the published artifact, regardless of name/token.
         self.assertEqual(len(self.manager.snapshot['publications']), 2)
         self.assertEqual(len(self.fetches), 3)
-        self.assertEqual(len(self.checks), 8)
+        self.assertEqual(len(self.checks), 12)
         self.checks.clear()
         self.manager.refresh(download=False, check=True)
         self.assertEqual(len(self.fetches), 3)
-        self.assertEqual(len(self.checks), 8)
+        self.assertEqual(len(self.checks), 12)
         public = self.client.get('/api/state').text
         for private in (UUID, '/private', 'publications', 'fingerprint', 'subscription-test-admin'):
             self.assertNotIn(private, public)

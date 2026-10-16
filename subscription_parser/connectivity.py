@@ -1,4 +1,4 @@
-"""Bounded HTTPS checks through isolated Mihomo and Xray clients."""
+"""Bounded HTTPS checks through each isolated client core."""
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,13 +22,13 @@ import yaml
 
 from . import common, protocols
 
-CORES = ('mihomo', 'xray')
+CORES = ('mihomo', 'xray', 'hiddify')
 URLS = ('https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204')
 REQUEST_TIMEOUT = 8
 START_TIMEOUT = 5
 BATCH_TIMEOUT = 300
 WORKERS = 4
-POLICY_VERSION = 1
+POLICY_VERSION = 2
 
 
 def unique_entries(entries):
@@ -85,9 +85,6 @@ def filtered_entries(entries, results, max_age, now=None):
             if value['status'] != 'passed':
                 entry.outputs.pop(core, None)
                 entry.issues[core] = value.get('reason', 'Connection check did not pass')
-        if not any(value['status'] == 'passed' for value in statuses.values()):
-            entry.outputs.pop('hiddify', None)
-            entry.issues['hiddify'] = 'No recent successful Mihomo or Xray connection check'
     return filtered
 
 
@@ -98,6 +95,13 @@ def configuration(entry, target, port):
                 'mode': 'rule', 'log-level': 'silent', 'find-process-mode': 'off',
                 'profile': {'store-selected': False, 'store-fake-ip': False},
                 'proxies': nodes, 'rules': ['MATCH,probe']}
+    if target == 'hiddify':
+        return {'log': {'disabled': True},
+                'dns': {'servers': [{'type': 'local', 'tag': 'local'}]},
+                'inbounds': [{'type': 'mixed', 'tag': 'probe-in', 'listen': '127.0.0.1', 'listen_port': port}],
+                'outbounds': nodes,
+                'route': {'final': 'probe', 'default_domain_resolver': 'local',
+                          'rules': [{'inbound': ['probe-in'], 'action': 'route', 'outbound': 'probe'}]}}
     return {'log': {'loglevel': 'none'},
             'inbounds': [{'tag': 'probe-in', 'listen': '127.0.0.1', 'port': port,
                           'protocol': 'http', 'settings': {}}],
@@ -141,7 +145,7 @@ def terminate(process):
 
 
 def probe(entry, target, root, stop, deadline, urls=URLS):
-    executable = Path(os.environ.get('PARSER_TOOLS_DIR') or root / '.tools') / target
+    executable = Path(os.environ.get('PARSER_TOOLS_DIR') or root / '.tools') / ('hiddify-core' if target == 'hiddify' else target)
     if not executable.is_file():
         return result('error', 'Client core is not installed')
     process = None
@@ -155,6 +159,7 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
             path = folder / ('config.yaml' if target == 'mihomo' else 'config.json')
             common.atomic_write(path, yaml.safe_dump(document) if target == 'mihomo' else common.json_text(document))
             command = ([str(executable), '-d', str(folder), '-f', str(path)] if target == 'mihomo'
+                       else [str(executable), 'srun', '-c', str(path)] if target == 'hiddify'
                        else [str(executable), 'run', '-config', str(path)])
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                        stderr=subprocess.DEVNULL, cwd=folder, start_new_session=True)
@@ -225,8 +230,15 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
     jobs.sort(key=lambda job: previous.get(job[3], {}).get(job[1], {}).get('checked_ts', 0))
     deadline = time.monotonic() + BATCH_TIMEOUT
     def run(job):
-        entry, core, key, _ = job
+        entry, core, key, record_id = job
         if stop.is_set() or time.monotonic() >= deadline:
+            cached = previous.get(record_id, {}).get(core, {})
+            if (cached.get('status') == 'passed' and cached.get('fingerprint') == key
+                    and 0 < cached.get('checked_ts', 0) <= time.time()):
+                # Keep the original timestamp: publication still expires this
+                # result normally. A deferred job must not erase a valid check
+                # or make it appear to have just been tested.
+                return dict(cached)
             return result('pending', 'Batch time limit reached; retry scheduled', fingerprint=key)
         try:
             value = tester(entry, core, root, stop, deadline)
