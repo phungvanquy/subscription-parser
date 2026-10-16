@@ -162,6 +162,9 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
+                expect(page.locator('#last-refresh')).to_contain_text('Providers downloaded')
+                download_time = manager.snapshot['last_download']
+                download_label = page.locator('#last-refresh').get_attribute('title')
                 for row in page.locator('#provider-rows tr').all():
                     expect(row.locator('.server-count')).to_have_text('2')
                     expect(row.locator('.provider-working')).to_have_text('0 working')
@@ -179,6 +182,13 @@ def main():
                 checks.append('cached connection checks publish passing nodes without another provider fetch')
                 page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#stat-servers')).to_have_text('2', timeout=15000)
+                expect(page.locator('#last-refresh')).to_contain_text('Providers downloaded')
+                expect(page.locator('#last-refresh')).to_have_attribute('title', download_label)
+                expect(page.locator('#last-connection-check')).to_contain_text('Connections checked')
+                expect(page.locator('#stat-next')).to_contain_text('Next download at')
+                assert manager.snapshot['last_download'] == download_time
+                assert manager.snapshot['last_check']
+                checks.append('provider download and connection-check timestamps remain separate')
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 checks.append('explicit per-link devices, test-before-save and reuse of tested responses')
 
@@ -593,7 +603,10 @@ def main():
                     active.locator('[data-action=refresh]').click()
                     assert check_started.wait(5)
                     page.evaluate('loadState()')
-                    expect(page.locator('#last-refresh')).to_contain_text('Checking Renamed provider')
+                    expect(page.locator('#last-refresh')).to_contain_text('Providers downloaded')
+                    expect(page.locator('#last-connection-check')).to_contain_text('Connections checked')
+                    expect(page.locator('.refresh-label')).to_have_text('Refresh all')
+                    expect(page.locator('#refresh-button.spinning')).to_have_count(0)
                     expect(active.locator('.provider-check-note')).to_have_text('Checking…')
                     expect(inactive.locator('.provider-check-note')).to_have_count(0)
                     assert len(seen) == before_fetch + 1

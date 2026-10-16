@@ -208,16 +208,28 @@ The JSON feed can retain these settings in accepted native configurations.
 
 ## Connection checks and publication
 
-Connection checks run after refreshes and every **10 minutes** by default, using
-cached configurations. Change the interval under **Settings → Connection checks**.
+Connection checks run in a shared scheduled batch every **10 minutes** by default,
+using cached configurations. Change the interval under **Settings → Connection checks**.
+Individual result timestamps do not start separate scheduled jobs. The next batch
+survives application restarts; provider edits and checks for newly added servers
+do not postpone it. Results checked in the last minute are reused at a batch
+boundary to avoid repeating a just-completed check. Unfinished work resumes
+after a short backoff, keeping the original expiry of any retained passing result.
 **Check servers** explicitly rechecks all servers without fetching providers or
-sending HWIDs. Scheduled refreshes and checks reuse results until each
-configuration is due.
+sending HWIDs. **Refresh all** downloads all enabled providers and explicitly
+rechecks them. Both start a new batch interval; a single-provider refresh keeps
+the existing global schedules. Automatic downloads between scheduled batches
+reuse recent results and check new, changed, or due configurations.
 Saving a tested provider or changing a subscription selection schedules checks
 only for configurations with missing, changed, or due results. Recent successful
 and failed results keep their original timestamps; edits never extend their
 expiry. Renaming, pausing, and deleting providers rebuild the feeds without
 fetching or rechecking unchanged servers.
+
+The Providers page shows separate **Providers downloaded** and **Connections
+checked** timestamps. Connection checks and feed rebuilds never advance the
+download timestamp. Dashboard status polling (15 seconds idle, 1.5 seconds while
+working) only reads state; it does not trigger downloads or connection checks.
 
 For each compatible configuration, an isolated Mihomo, Xray or Hiddify process sends an
 HTTPS request through the node. The request must pass TLS verification and return

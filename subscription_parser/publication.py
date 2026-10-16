@@ -30,7 +30,7 @@ def build(entries, results, max_age, evaluated_at, generated, validation, last_c
         entry = unique[server['id']]
         health = {core: connectivity.current_result(entry, core, results, max_age, evaluated_at)
                   for core in connectivity.CORES}
-        server['connectivity'] = {core: {k: v for k, v in value.items() if k not in {'fingerprint', 'checked_ts'}}
+        server['connectivity'] = {core: {k: v for k, v in value.items() if k not in {'fingerprint', 'checked_ts', 'deferred'}}
                                   for core, value in health.items()}
         pending |= any(value['status'] in {'pending', 'stale'} for value in health.values())
         expiries.extend(value['checked_ts'] + max_age for value in health.values() if value['status'] == 'passed')

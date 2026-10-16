@@ -366,6 +366,12 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
   .activity-row p, .activity-row time { font-size: 11px; }
 }
 
+.provider-heading { flex-wrap: wrap; gap: 12px; }
+.provider-timestamps { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; line-height: 1.5; text-align: right; }
+@media (max-width: 640px) {
+  .provider-timestamps { width: 100%; text-align: left; }
+}
+
 /* Account security and authenticator enrollment. */
 .security-panel { grid-column: 1 / -1; }
 .security-panel .settings-form h3 { margin: 0 0 8px; font-size: 16px; }

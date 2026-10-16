@@ -29,6 +29,8 @@ START_TIMEOUT = 5
 BATCH_TIMEOUT = 300
 WORKERS = 4
 POLICY_VERSION = 2
+# Avoid repeating a just-completed manual/provider check at a batch boundary.
+BATCH_REUSE_SECONDS = 60
 
 
 def unique_entries(entries):
@@ -211,19 +213,20 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
         terminate(process)
 
 
-def next_check_at(results, interval, now=None):
+def next_check_at(results, interval, now=None, *, batch_due=None):
     now = time.time() if now is None else now
-    deadlines = []
+    deadline = now + interval if batch_due is None else batch_due
     for values in results.values():
         for value in values.values():
             if value.get('status') == 'unsupported':
                 continue
             checked = value.get('checked_ts', 0)
             complete = value.get('status') in {'passed', 'failed', 'error'} and 0 < checked <= now
-            deadlines.append(checked + interval if complete else now)
-    # Pending/deferred batches get a short backoff; recent results retain their
-    # individual deadlines instead of being postponed by unrelated new servers.
-    return max(now + 5, min(deadlines, default=now + interval))
+            if not complete or value.get('deferred'):
+                deadline = min(deadline, now + 5)
+    # Completed results share one batch deadline. Individual probe completion
+    # times still control publication expiry, never the next regular batch.
+    return max(now + 5, deadline)
 
 
 def check_entries(entries, root, *, stop=None, previous=None, progress=None, tester=probe,
@@ -248,7 +251,7 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
             seen.add((entry.identity, core, key))
             record_id = entry.identity if core not in records[entry.identity] else entry.identity + ':' + key
             cached = matching_result(entry.identity, core, key, previous)
-            current = (cached.get('status') in {'passed', 'failed', 'error'}
+            current = (not cached.get('deferred') and cached.get('status') in {'passed', 'failed', 'error'}
                        and 0 < cached.get('checked_ts', 0) <= evaluated_at
                        and evaluated_at - cached['checked_ts'] < reuse_seconds)
             selected = targets is None or (entry.identity, core, key) in targets
@@ -267,7 +270,7 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
                 # Keep the original timestamp: publication still expires this
                 # result normally. A deferred job must not erase a valid check
                 # or make it appear to have just been tested.
-                return dict(cached)
+                return {**cached, 'deferred': True}
             return result('pending', 'Batch time limit reached; retry scheduled', fingerprint=key)
         try:
             value = tester(entry, core, root, stop, deadline)

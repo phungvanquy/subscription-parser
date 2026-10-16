@@ -116,6 +116,12 @@ Poll `/api/state` for `busy`, `busy_action`, `busy_provider_id`, and `check_prog
 a job. A queued request is not a completed check. Changes that conflict with a
 running job return HTTP 409.
 
+`last_download` is the latest successful provider download; `last_check` records
+the latest job that actually checked connections. `generated_at` records a feed
+rebuild and must not be displayed as a download time. `next_check` is the next
+scheduled batch or an earlier continuation for pending work. Regular batches
+share one persisted deadline; new-provider checks do not postpone it.
+
 State counts describe the whole workspace. Each item in `subscriptions` contains
 its own `total`, `published_total`, `counts`, `ready`, `provider_ids`, and `links`.
 The top-level `links` field is a compatibility alias for the original `default`

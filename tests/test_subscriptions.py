@@ -63,6 +63,7 @@ class SubscriptionTests(unittest.TestCase):
         before = copy.deepcopy(self.manager.snapshot)
         deadlines = (time.time() + 1800, time.time() + 300)
         self.manager.next_refresh, self.manager.next_check = deadlines
+        batch_due = self.manager.next_check_batch
         selected_ids = {node['id'] for node in before['inventory'] if provider['name'] in node['sources']}
         expected = {(identity, core) for identity, values in before['connectivity'].items()
                     if identity[:16] in selected_ids for core in values}
@@ -79,6 +80,7 @@ class SubscriptionTests(unittest.TestCase):
             if identity[:16] not in selected_ids:
                 self.assertEqual(self.manager.snapshot['connectivity'][identity], values)
         self.assertEqual((self.manager.next_refresh, self.manager.next_check), deadlines)
+        self.assertEqual(self.manager.next_check_batch, batch_due)
         self.assertEqual(self.manager.snapshot['history'][0]['provider_id'], provider['id'])
         self.assertEqual(self.groups()['default']['published_total'], 4)
         checked = next(row['context'] for row in self.manager.logs.recent()['entries'] if row['event'] == 'checks_completed')
@@ -86,7 +88,7 @@ class SubscriptionTests(unittest.TestCase):
 
     def test_saving_a_tested_provider_checks_only_missing_results_in_background(self):
         before = copy.deepcopy(self.manager.snapshot['connectivity'])
-        next_due = min(value['checked_ts'] for values in before.values() for value in values.values()) + 600
+        next_due = self.manager.next_check_batch
         self.fetches.clear(); self.checks.clear()
         body = {'name': 'Delta', 'url': 'https://Delta.example/private', 'hwid_id': None}
         preview = self.client.post('/api/providers/test', json=body)
@@ -94,6 +96,9 @@ class SubscriptionTests(unittest.TestCase):
         saved = self.client.post('/api/providers', json={**body, 'test_token': preview.json()['test_token']})
         self.assertEqual(saved.status_code, 201)
         self.assertEqual(self.checks, [])
+        restarted = create_app(self.root, start_scheduler=False).state.manager
+        self.assertEqual(restarted.next_check_batch, next_due)
+        self.assertLessEqual(restarted.next_check, time.time() + 5)
         self.manager.begin_check(reuse_recent=True)
         self.manager.worker.join(5)
         self.assertFalse(self.manager.busy)
@@ -172,7 +177,7 @@ class SubscriptionTests(unittest.TestCase):
 
     def test_scheduled_refresh_reuses_recent_checks_after_downloading(self):
         before = copy.deepcopy(self.manager.snapshot['connectivity'])
-        next_due = min(value['checked_ts'] for values in before.values() for value in values.values()) + 600
+        next_due = self.manager.next_check_batch
         self.fetches.clear(); self.checks.clear()
         self.manager.begin_refresh(reuse_recent=True)
         self.manager.worker.join(5)
@@ -182,6 +187,124 @@ class SubscriptionTests(unittest.TestCase):
         self.assertEqual(self.checks, [])
         self.assertEqual(self.manager.snapshot['connectivity'], before)
         self.assertAlmostEqual(self.manager.next_check, next_due, places=2)
+
+    def test_regular_batch_groups_staggered_results_and_persists_its_schedule(self):
+        now = time.time()
+        for index, values in enumerate(self.manager.snapshot['connectivity'].values()):
+            for value in values.values():
+                value['checked_ts'] = now - 610 + index * 100
+        self.manager.next_check_batch = now
+        self.fetches.clear(); self.checks.clear()
+        with patch('subscription_parser.service.time.time', return_value=now):
+            self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(len(self.checks), 12)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.manager.next_check, now + 600)
+        restarted = create_app(self.root, start_scheduler=False).state.manager
+        self.assertEqual(restarted.next_check_batch, now + 600)
+        self.assertEqual(restarted.next_check, now + 600)
+        with patch('subscription_parser.service.time.time', return_value=now + 30), \
+                patch.object(restarted.stop, 'wait', side_effect=[False, True]), \
+                patch.object(restarted, 'begin_check') as begin_check:
+            restarted.scheduler()
+        begin_check.assert_not_called()
+
+    def test_batch_boundary_reuses_just_completed_results_without_postponing_checks(self):
+        now = time.time()
+        self.manager.next_check_batch = now
+        before = copy.deepcopy(self.manager.snapshot['connectivity'])
+        self.checks.clear()
+        with patch('subscription_parser.service.time.time', return_value=now):
+            self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual(self.checks, [])
+        self.assertEqual(self.manager.snapshot['connectivity'], before)
+        self.assertEqual(self.manager.next_check, now + 600)
+
+    def test_deferred_batch_resumes_without_advancing_schedule_or_claiming_new_checks(self):
+        before = copy.deepcopy(self.manager.snapshot)
+        with patch.object(connectivity, 'BATCH_TIMEOUT', 0):
+            self.manager.refresh(download=False, check=True)
+        self.assertNotIn('last_error', self.manager.snapshot)
+        batch_due = self.manager.next_check_batch
+        self.assertLessEqual(self.manager.next_check, time.time() + 5)
+        self.assertEqual(self.manager.snapshot['last_check'], before['last_check'])
+        self.assertEqual(self.manager.snapshot['history'][0]['checked'], 0)
+        for identity, values in before['connectivity'].items():
+            for core, value in values.items():
+                self.assertEqual(self.manager.snapshot['connectivity'][identity][core]['checked_ts'], value['checked_ts'])
+        self.checks.clear()
+        self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual(len(self.checks), 12)
+        self.assertEqual(self.manager.next_check, batch_due)
+        self.assertEqual(self.manager.next_check_batch, batch_due)
+        self.assertEqual(self.manager.snapshot['history'][0]['checked'], 12)
+        self.assertTrue(all('deferred' not in value for values in self.manager.snapshot['connectivity'].values()
+                            for value in values.values()))
+
+    def test_download_timestamp_changes_only_after_a_successful_fetch(self):
+        downloaded = self.manager.snapshot['last_download']
+        checked = self.manager.snapshot['last_check']
+        self.fetches.clear()
+        self.manager.refresh(download=False, check=True)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.manager.snapshot['last_download'], downloaded)
+        self.assertNotEqual(self.manager.snapshot['last_check'], checked)
+        self.manager.refresh(download=False, check=False)
+        self.assertEqual(self.manager.snapshot['last_download'], downloaded)
+        with patch.object(self.manager, 'fetcher', side_effect=common.SubscriptionError('provider returned HTTP 503')):
+            self.manager.refresh()
+        self.assertEqual(self.manager.snapshot['last_download'], downloaded)
+        self.manager.refresh(selected=self.providers[0]['id'])
+        self.assertNotEqual(self.manager.snapshot['last_download'], downloaded)
+        self.assertEqual(self.client.get('/api/state').json()['last_download'], self.manager.snapshot['last_download'])
+
+    def test_deferred_provider_refresh_resumes_only_its_checks_and_preserves_batch_deadline(self):
+        batch_due = self.manager.next_check_batch
+        with patch.object(connectivity, 'BATCH_TIMEOUT', 0):
+            self.manager.refresh(selected=self.providers[0]['id'])
+        self.assertLessEqual(self.manager.next_check, time.time() + 5)
+        self.assertEqual(self.manager.next_check_batch, batch_due)
+        self.checks.clear(); self.fetches.clear()
+        self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual(len(self.checks), 6)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.manager.next_check, batch_due)
+
+    def test_failed_batch_retries_without_advancing_regular_schedule(self):
+        now = time.time()
+        self.manager.next_check_batch = now
+        with patch('subscription_parser.service.time.time', return_value=now), \
+                patch.object(self.manager, 'checker', side_effect=RuntimeError('synthetic failure')):
+            self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertIn('last_error', self.manager.snapshot)
+        self.assertFalse(self.manager.busy)
+        self.assertEqual(self.manager.next_check_batch, now)
+        self.assertEqual(self.manager.next_check, now + 30)
+
+    def test_check_interval_change_persists_the_new_batch_clock(self):
+        response = self.client.put('/api/settings', json={'check_seconds': 3600})
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(self.manager.next_check, time.time())
+        self.assertLessEqual(self.manager.next_check_batch, time.time())
+        now = time.time()
+        with patch('subscription_parser.service.time.time', return_value=now):
+            self.manager.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual(self.manager.next_check, now + 3600)
+        restarted = create_app(self.root, start_scheduler=False).state.manager
+        self.assertEqual(restarted.next_check, now + 3600)
+        self.assertEqual(restarted.next_check_batch, now + 3600)
+
+    def test_existing_snapshots_get_a_batch_schedule_and_real_download_timestamp(self):
+        snapshot = copy.deepcopy(self.manager.snapshot)
+        for key in ('next_check', 'next_check_batch', 'last_download'):
+            snapshot.pop(key, None)
+        common.atomic_write(self.manager.snapshot_path, common.json_text(snapshot))
+        restarted = create_app(self.root, start_scheduler=False).state.manager
+        self.assertLessEqual(restarted.next_check, time.time() + 5)
+        self.assertEqual(restarted.snapshot['last_download'],
+                         max(provider['fetched_at'] for provider in snapshot['providers'].values()))
+        self.assertEqual(restarted.snapshot['connectivity'], snapshot['connectivity'])
 
     def test_restart_labels_saved_uri_counts_until_native_feed_is_built(self):
         self.create('Scoped', self.providers[:1])

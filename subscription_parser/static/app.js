@@ -102,11 +102,15 @@ function render(){
   $('stat-protocols').textContent=types.length;$('stat-protocol-detail').textContent=types.map(p=>p.toUpperCase()).join(' · ')||'Original protocols preserved';
   const checking=state.busy_action==='checking',activeProvider=providers.find(p=>p.id===state.busy_provider_id);
   const working=checking?`Checking ${activeProvider?.name||'servers'} (${state.check_progress.done}/${state.check_progress.total})…`:state.busy_action==='updating'?'Updating subscriptions…':`Refreshing ${activeProvider?.name||'all providers'}…`;
-  $('stat-interval').textContent=interval(state.refresh_seconds);$('stat-next').textContent=state.busy?working:`Next at ${new Date(state.next_refresh*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
-  $('refresh-button').disabled=state.busy;$('refresh-button').classList.toggle('spinning',state.busy);document.querySelector('.refresh-label').textContent=state.busy?(checking?'Checking…':'Refreshing…'):'Refresh all';
+  const downloadingAll=state.busy_action==='fetching'&&!state.busy_provider_id;
+  $('stat-interval').textContent=interval(state.refresh_seconds);$('stat-next').textContent=downloadingAll?'Downloading providers…':`Next download at ${new Date(state.next_refresh*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
+  $('refresh-button').disabled=state.busy;$('refresh-button').classList.toggle('spinning',downloadingAll);document.querySelector('.refresh-label').textContent=downloadingAll?'Refreshing…':'Refresh all';
   $('check-servers').disabled=state.busy||!state.total;
-  $('connection-summary').textContent=state.busy?working:`${state.published_total||0} of ${state.total} nodes included · ${Math.max(0,state.total-(state.published_total||0))} excluded · Last checked ${relative(state.last_check).toLowerCase()} · Recheck every ${interval(state.check_seconds).toLowerCase()}. Checks use saved subscriptions; HWIDs are not sent.`;
-  $('last-refresh').textContent=state.busy?working:`Updated ${relative(state.generated_at).toLowerCase()}`;
+  $('connection-summary').textContent=state.busy?working:`${state.published_total||0} of ${state.total} nodes included · ${Math.max(0,state.total-(state.published_total||0))} excluded · Last checked ${relative(state.last_check).toLowerCase()} · Next check at ${new Date(state.next_check*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · Scheduled every ${interval(state.check_seconds).toLowerCase()}. Checks use saved subscriptions; HWIDs are not sent.`;
+  $('last-refresh').textContent=`Providers downloaded: ${relative(state.last_download)}`;
+  $('last-refresh').title=date(state.last_download);
+  $('last-connection-check').textContent=`Connections checked: ${relative(state.last_check)}`;
+  $('last-connection-check').title=date(state.last_check);
   $('global-error').hidden=!state.last_error;if(state.last_error)$('global-error').textContent=state.last_error;
   renderProviders(providerServers);
   $('providers-empty').hidden=providers.length>0;
@@ -118,7 +122,7 @@ function render(){
   renderDevices();
   if(document.activeElement!==$('refresh-interval'))$('refresh-interval').value=state.refresh_seconds;
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
-  $('footer-time').textContent=state.generated_at?`Last updated ${date(state.generated_at)}`:'';
+  $('footer-time').textContent=state.generated_at?`Feeds rebuilt ${date(state.generated_at)}`:'';
 }
 function renderProviders(providerServers){
   const rows=$('provider-rows'),expanded=new Set([...rows.querySelectorAll('details[open]')].map(el=>el.id));

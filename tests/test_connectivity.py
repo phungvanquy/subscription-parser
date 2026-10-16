@@ -92,7 +92,8 @@ class ConnectivityTests(unittest.TestCase):
         with patch.object(c, 'BATCH_TIMEOUT', 0):
             values = c.check_entries(self.nodes, self.root, previous=previous,
                                     tester=lambda *args: self.fail('must not probe'))
-        self.assertEqual(values[self.nodes[0].identity], previous[self.nodes[0].identity])
+        self.assertEqual(values[self.nodes[0].identity],
+                         {core: {**value, 'deferred': True} for core, value in previous[self.nodes[0].identity].items()})
         self.assertTrue(all(v['status'] == 'pending' for v in values[self.nodes[1].identity].values()))
         future = max(v['checked_ts'] for v in values[self.nodes[0].identity].values()) + 1201
         self.assertFalse(c.filtered_entries(self.nodes, values, 1200, now=future)[0].outputs)
@@ -179,16 +180,31 @@ class ConnectivityTests(unittest.TestCase):
         self.assertEqual(c.current_result(first, 'xray', values, 1200)['status'], 'passed')
         self.assertEqual(c.current_result(second, 'xray', values, 1200)['status'], 'pending')
 
-    def test_next_check_uses_oldest_remaining_result_and_backs_off_pending_work(self):
+    def test_next_check_uses_shared_deadline_and_backs_off_unfinished_work(self):
         results = {'one': {'xray': {'status': 'passed', 'checked_ts': 100},
                            'mihomo': {'status': 'failed', 'checked_ts': 150},
                            'hiddify': {'status': 'unsupported'}}}
-        self.assertEqual(c.next_check_at(results, 600, now=200), 700)
+        self.assertEqual(c.next_check_at(results, 600, now=200, batch_due=800), 800)
+        results['one']['xray']['deferred'] = True
+        self.assertEqual(c.next_check_at(results, 600, now=200, batch_due=800), 205)
         results['one']['xray'] = {'status': 'pending'}
         self.assertEqual(c.next_check_at(results, 600, now=200), 205)
         results['one']['xray'] = {'status': 'passed', 'checked_ts': 250}
         self.assertEqual(c.next_check_at(results, 600, now=200), 205)
         self.assertEqual(c.next_check_at({}, 600, now=200), 800)
+        self.assertEqual(c.next_check_at({}, 600, now=200, batch_due=100), 205)
+
+    def test_deferred_recent_passes_are_resumed_without_repeating_completed_checks(self):
+        previous = self.records(lambda *args: c.result('passed'))
+        previous[self.nodes[0].identity]['xray']['deferred'] = True
+        calls = []
+        def tester(node, core, *args):
+            calls.append((node.identity, core))
+            return c.result('passed')
+        values = c.check_entries(self.nodes, self.root, previous=previous, reuse_seconds=600, tester=tester)
+        self.assertEqual(calls, [(self.nodes[0].identity, 'xray')])
+        self.assertNotIn('deferred', values[self.nodes[0].identity]['xray'])
+        self.assertEqual(values[self.nodes[1].identity], previous[self.nodes[1].identity])
 
 
 class ConnectivityWebTests(unittest.TestCase):

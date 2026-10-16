@@ -44,6 +44,12 @@ class Manager:
         self.snapshot = json.loads(self.snapshot_path.read_text()) if self.snapshot_path.exists() else {
             "generated_at": None, "providers": {}, "inventory": [], "diagnostics": [], "counts": {}, "total": 0,
             "exports": {}, "history": [], "duplicates_removed": 0}
+        self.snapshot.setdefault('last_download', max((value['fetched_at']
+            for value in self.snapshot.get('providers', {}).values() if value.get('fetched_at')), default=None))
+        self.next_check_batch = self.snapshot.get('next_check_batch', time.time())
+        self.next_check = connectivity.next_check_at(self.snapshot.get('connectivity', {}),
+            self.store.config()['check_seconds'], batch_due=self.next_check_batch)
+        self.next_check = min(self.next_check, self.snapshot.get('next_check', self.next_check))
         if self.snapshot.get('generated_at'):
             self.next_refresh = time.time() + self.store.config()['refresh_seconds']
         # A saved pre-JSON publication uses "v2board" for its URI count.
@@ -66,6 +72,7 @@ class Manager:
             self.snapshot['published_total'] = 0
             for server in self.snapshot.get('inventory', []):
                 server['clients'] = []
+            self.next_check_batch = self.next_check = time.time()
         self._upgrade_cached_requests()
         if self.snapshot.get('generated_at') and 'sources_key' not in self.snapshot:
             # Bind pre-upgrade snapshots once before accepting configuration
@@ -155,7 +162,7 @@ class Manager:
                 key = value.get('fingerprint')
                 old = (connectivity.matching_result(identity.split(':')[0], core, key, previous) if key
                        else previous.get(identity, {}).get(core, {}))
-                if changed_only and value == old:
+                if changed_only and (value == old or value.get('deferred')):
                     continue
                 counts[status] += 1
                 if status in {'failed', 'error'} and (status, value.get('reason')) != (old.get('status'), old.get('reason')):
@@ -164,9 +171,12 @@ class Manager:
                 elif status == 'passed' and old.get('status') in {'failed', 'error'}:
                     self.logs.write('node_recovered', node_id=identity[:16], core=core)
         self.logs.write('checks_completed', passed=counts['passed'], failed=counts['failed'], errors=counts['error'])
+        return counts['passed'] + counts['failed'] + counts['error']
 
     def refresh(self, selected=None, download=True, check=None, reuse_recent=False):
         started = time.monotonic()
+        started_at = time.time()
+        completed = False
         check = download if check is None else check
         operation = 'refresh' if download else 'connection check' if check else 'configuration update'
         stage = 'fetch'
@@ -178,6 +188,7 @@ class Manager:
                 self.busy_provider_id = selected
                 self.check_progress = {'done': 0, 'total': 0}
             config = self.store.config()
+            batch_check = check and selected is None and (not reuse_recent or started_at >= self.next_check_batch)
             sources_key = self.sources_key(config)
             enabled = [p for p in config["providers"] if p["enabled"]]
             entries, statuses, by_provider = [], {}, {}
@@ -209,6 +220,7 @@ class Manager:
                 self.log_validation(accepted)
                 scopes[key] = (nodes, accepted['validation'])
             results = self.snapshot.get('connectivity', {})
+            checked = 0
             if check:
                 stage = 'check'
                 with self.guard:
@@ -237,19 +249,30 @@ class Manager:
                                 continue
                 results = self.checker(check_entries, self.store.root, stop=self.stop,
                                        previous=results, progress=progress, targets=targets,
-                                       reuse_seconds=config['check_seconds'] if reuse_recent else 0)
-                self.log_checks(previous, results, changed_only=True)
+                                       reuse_seconds=(connectivity.BATCH_REUSE_SECONDS if batch_check else config['check_seconds'])
+                                       if reuse_recent else 0)
+                checked = self.log_checks(previous, results, changed_only=True)
             stage = 'publish'
             max_age = config['check_seconds'] * 2
             evaluated_at = time.time()
             generated = common.now()
-            last_check = generated if check and self.check_progress['total'] else self.snapshot.get('last_check')
+            last_check = generated if checked else self.snapshot.get('last_check')
+            last_download = max((stamp for stamp in [self.snapshot.get('last_download'),
+                *(status.get('fetched_at') for status in statuses.values())] if stamp), default=None)
+            next_batch = started_at + config['check_seconds'] if batch_check else self.next_check_batch
             publications, pending = {}, False
             for key, (nodes, validation) in scopes.items():
                 published, waiting = publication.build(nodes, results, max_age, evaluated_at, generated, validation, last_check)
                 publications[key] = published
                 pending |= waiting
             combined = publications.pop('all')
+            next_check = self.next_check
+            if check and selected is None:
+                next_check = connectivity.next_check_at(results, config['check_seconds'], batch_due=next_batch)
+            elif check:
+                next_check = connectivity.next_check_at(results, config['check_seconds'], batch_due=next_check)
+            elif not check and pending:
+                next_check = min(next_check, time.time() + 5)
             event = {"at": generated, "seconds": round(time.monotonic() - started, 2), "servers": combined["total"],
                      "published": combined['published_total'],
                      "fresh": sum(s["status"] == "fresh" for s in statuses.values()),
@@ -257,17 +280,17 @@ class Manager:
                      "action": "refresh" if download else "connection check" if check else "configuration updated"}
             if selected is not None:
                 event['provider_id'] = selected
-            event['checked'] = self.check_progress['total']
+            event['checked'] = checked
             snapshot = {k: v for k, v in combined.items() if k not in protocols.TARGETS}
             snapshot.update(providers=statuses, publications=publications, connectivity=results, sources_key=sources_key,
+                            last_download=last_download, next_check_batch=next_batch, next_check=next_check,
                             history=([event] + self.snapshot.get("history", []))[:20])
             common.atomic_write(self.snapshot_path, common.json_text(snapshot))
             with self.guard:
                 self.snapshot = snapshot
-                if not check and pending:
-                    # Batch consecutive saves briefly without postponing an
-                    # already due check. The scheduler reuses recent results.
-                    self.next_check = min(self.next_check, time.time() + 5)
+                self.next_check_batch = next_batch
+                self.next_check = next_check
+                completed = True
             self.logs.write('run_completed', operation=operation, servers=event['servers'], published=event['published'],
                             cached=event['cached'], seconds=event['seconds'])
         except Exception as error:
@@ -283,8 +306,8 @@ class Manager:
                 config = self.store.config()
                 if download and selected is None:
                     self.next_refresh = time.time() + config['refresh_seconds']
-                if check and selected is None:
-                    self.next_check = connectivity.next_check_at(self.snapshot.get('connectivity', {}), config['check_seconds'])
+                if check and selected is None and not completed:
+                    self.next_check = time.time() + 30
 
     def begin_refresh(self, selected=None, *, reuse_recent=False):
         with self.guard:
@@ -332,6 +355,7 @@ class Manager:
                 self.next_refresh = time.time() + config['refresh_seconds']
             if 'check_seconds' in values:
                 self.busy = True
+                self.next_check_batch = time.time()
         if 'check_seconds' in values:
             self.refresh(download=False, check=False)
             with self.guard:
@@ -502,7 +526,7 @@ class Manager:
             config = self.store.config()
             subscriptions = self.public_subscriptions(base_url)
             providers = [self.store.public_provider(p) | snapshot.get("providers", {}).get(p["id"], {"status": "pending", "count": 0, "protocols": {}}) for p in config["providers"]]
-            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications", "sources_key"}}
+            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications", "sources_key", "next_check_batch"}}
             if not self.publication_current(snapshot):
                 public['counts'] = {target: 0 for target in (*protocols.TARGETS, 'v2board', 'v2board_uri')}
                 public['published_total'] = 0
