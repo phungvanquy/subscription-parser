@@ -38,6 +38,12 @@ Provider refreshes run hourly by default. Change the interval in
 **Settings → Refresh schedule**, or use **Refresh all** or a provider's refresh
 action for an immediate download.
 
+A provider's **Refresh provider** action downloads and checks only that provider's
+servers. Other providers keep their cached responses and check timestamps, and
+their scheduled refreshes are not postponed. Identical configurations shared by
+multiple providers are checked once; each distinct native configuration keeps
+its own result. **Refresh all** downloads and checks all enabled providers.
+
 A failed or invalid download can reuse the last successful response for the
 same URL, user agent, and device assignment/revision. The provider is marked
 **Cached**. Its nodes still need recent passing connection checks to be published.
@@ -204,7 +210,14 @@ The JSON feed can retain these settings in accepted native configurations.
 
 Connection checks run after refreshes and every **10 minutes** by default, using
 cached configurations. Change the interval under **Settings → Connection checks**.
-**Check servers** starts the same check without fetching providers or sending HWIDs.
+**Check servers** explicitly rechecks all servers without fetching providers or
+sending HWIDs. Scheduled refreshes and checks reuse results until each
+configuration is due.
+Saving a tested provider or changing a subscription selection schedules checks
+only for configurations with missing, changed, or due results. Recent successful
+and failed results keep their original timestamps; edits never extend their
+expiry. Renaming, pausing, and deleting providers rebuild the feeds without
+fetching or rechecking unchanged servers.
 
 For each compatible configuration, an isolated Mihomo, Xray or Hiddify process sends an
 HTTPS request through the node. The request must pass TLS verification and return

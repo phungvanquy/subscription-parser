@@ -53,6 +53,16 @@ def result(status, reason=None, **fields):
     return value
 
 
+def matching_result(identity, target, key, results):
+    # The primary variant can change when providers or selections are reordered.
+    # Always match the configuration, including for preserved and deferred checks.
+    for record_id in (identity, identity + ':' + key):
+        value = results.get(record_id, {}).get(target, {})
+        if value.get('fingerprint') == key:
+            return value
+    return {}
+
+
 def current_result(entry, target, results, max_age, now=None):
     if target not in entry.outputs:
         return result('unsupported', 'No compatible configuration for this core')
@@ -60,12 +70,8 @@ def current_result(entry, target, results, max_age, now=None):
         key = fingerprint(entry, target)
     except protocols.Error:
         return result('unsupported', 'Configuration dependencies are unavailable')
-    value = results.get(entry.identity, {}).get(target, {})
-    if value.get('fingerprint') != key:
-        # The same logical server can have different native settings in two
-        # providers. A scoped feed must use the result for its exact settings.
-        value = results.get(entry.identity + ':' + key, {}).get(target, {})
-    if value.get('fingerprint') != key:
+    value = matching_result(entry.identity, target, key, results)
+    if not value:
         return result('pending', 'Waiting for a connection check')
     if not value.get('checked_ts'):
         return value
@@ -205,10 +211,27 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
         terminate(process)
 
 
-def check_entries(entries, root, *, stop=None, previous=None, progress=None, tester=probe):
+def next_check_at(results, interval, now=None):
+    now = time.time() if now is None else now
+    deadlines = []
+    for values in results.values():
+        for value in values.values():
+            if value.get('status') == 'unsupported':
+                continue
+            checked = value.get('checked_ts', 0)
+            complete = value.get('status') in {'passed', 'failed', 'error'} and 0 < checked <= now
+            deadlines.append(checked + interval if complete else now)
+    # Pending/deferred batches get a short backoff; recent results retain their
+    # individual deadlines instead of being postponed by unrelated new servers.
+    return max(now + 5, min(deadlines, default=now + interval))
+
+
+def check_entries(entries, root, *, stop=None, previous=None, progress=None, tester=probe,
+                  targets=None, reuse_seconds=0):
     stop = stop or threading.Event()
     previous = previous or {}
     records, jobs, seen = {}, [], set()
+    evaluated_at = time.time()
     for entry in [*unique_entries(entries), *entries]:
         records.setdefault(entry.identity, {})
         for core in CORES:
@@ -224,15 +247,21 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
                 continue
             seen.add((entry.identity, core, key))
             record_id = entry.identity if core not in records[entry.identity] else entry.identity + ':' + key
-            records.setdefault(record_id, {})[core] = result('pending', fingerprint=key)
-            jobs.append((entry, core, key, record_id))
+            cached = matching_result(entry.identity, core, key, previous)
+            current = (cached.get('status') in {'passed', 'failed', 'error'}
+                       and 0 < cached.get('checked_ts', 0) <= evaluated_at
+                       and evaluated_at - cached['checked_ts'] < reuse_seconds)
+            selected = targets is None or (entry.identity, core, key) in targets
+            records.setdefault(record_id, {})[core] = (
+                dict(cached) if cached and (not selected or current) else result('pending', fingerprint=key))
+            if selected and not current:
+                jobs.append((entry, core, key, record_id, cached))
     # Oldest/never-checked nodes go first so large lists cannot starve at the tail.
-    jobs.sort(key=lambda job: previous.get(job[3], {}).get(job[1], {}).get('checked_ts', 0))
+    jobs.sort(key=lambda job: job[4].get('checked_ts', 0))
     deadline = time.monotonic() + BATCH_TIMEOUT
     def run(job):
-        entry, core, key, record_id = job
+        entry, core, key, record_id, cached = job
         if stop.is_set() or time.monotonic() >= deadline:
-            cached = previous.get(record_id, {}).get(core, {})
             if (cached.get('status') == 'passed' and cached.get('fingerprint') == key
                     and 0 < cached.get('checked_ts', 0) <= time.time()):
                 # Keep the original timestamp: publication still expires this
@@ -250,7 +279,7 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
     with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='connection-check') as pool:
         futures = {pool.submit(run, job): job for job in jobs}
         for done, future in enumerate(as_completed(futures), 1):
-            _, core, _, record_id = futures[future]
+            _, core, _, record_id, _ = futures[future]
             records[record_id][core] = future.result()
             if progress:
                 progress(done, len(jobs))

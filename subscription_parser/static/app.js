@@ -93,7 +93,8 @@ function render(){
   $('stat-providers').textContent=providers.filter(p=>p.enabled).length;$('stat-provider-detail').textContent=`${providers.length} providers in your workspace`;
   $('stat-servers').textContent=state.published_total||0;$('stat-duplicate-detail').textContent=`${state.total} nodes in library · ${state.duplicates_removed||0} duplicates combined`;
   $('stat-protocols').textContent=types.length;$('stat-protocol-detail').textContent=types.map(p=>p.toUpperCase()).join(' · ')||'Original protocols preserved';
-  const checking=state.busy_action==='checking',working=checking?`Checking servers (${state.check_progress.done}/${state.check_progress.total})…`:'Refreshing subscriptions…';
+  const checking=state.busy_action==='checking',activeProvider=providers.find(p=>p.id===state.busy_provider_id);
+  const working=checking?`Checking ${activeProvider?.name||'servers'} (${state.check_progress.done}/${state.check_progress.total})…`:state.busy_action==='updating'?'Updating subscriptions…':`Refreshing ${activeProvider?.name||'all providers'}…`;
   $('stat-interval').textContent=interval(state.refresh_seconds);$('stat-next').textContent=state.busy?working:`Next at ${new Date(state.next_refresh*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
   $('refresh-button').disabled=state.busy;$('refresh-button').classList.toggle('spinning',state.busy);document.querySelector('.refresh-label').textContent=state.busy?(checking?'Checking…':'Refreshing…'):'Refresh all';
   $('check-servers').disabled=state.busy||!state.total;
@@ -106,7 +107,7 @@ function render(){
   const selectedProvider=$('provider-filter').value;$('provider-filter').innerHTML='<option value="">All providers</option>'+providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');if(providers.some(p=>p.id===selectedProvider))$('provider-filter').value=selectedProvider;
   const selected=$('protocol-filter').value;$('protocol-filter').innerHTML='<option value="">All protocols</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t.toUpperCase())}</option>`).join('');if(types.includes(selected))$('protocol-filter').value=selected;
   renderServers();renderIssues();
-  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${event.action==='refresh'?'Subscriptions refreshed':event.action==='connection check'?'Connections checked':'Subscription configuration updated'}</strong><p>${event.published??event.servers} included / ${event.servers} nodes · ${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
+  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.published??event.servers} included / ${event.servers} nodes · ${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''}${event.checked?` · ${event.checked} client checks`:''} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
   renderDevices();
   if(document.activeElement!==$('refresh-interval'))$('refresh-interval').value=state.refresh_seconds;
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
@@ -138,7 +139,8 @@ function providerServerCell(provider,servers,expanded){
   const working=servers.filter(n=>n.clients.length>0).length;
   const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];
   const statuses=servers.flatMap(n=>Object.values(n.connectivity||{}).map(value=>value.status));
-  const note=!provider.enabled?'Paused':state.busy_action==='checking'?'Checking…':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
+  const active=state.busy&&(!state.busy_provider_id||state.busy_provider_id===provider.id);
+  const note=!provider.enabled?'Paused':active&&state.busy_action==='checking'?'Checking…':active&&state.busy_action==='fetching'?'Refreshing…':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
   const detailsId=`provider-clients-${provider.id}`;
   return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${provider.count||0}</span> total</span></div>
     ${note?`<small class="provider-check-note">${note}</small>`:''}
@@ -284,7 +286,7 @@ function renderServers(){
 function renderIssues(){if(!state)return;const client=$('issue-client').value,issues=state.diagnostics.filter(i=>!client||i.client===client);$('issue-total').textContent=issues.length;$('issue-rows').innerHTML=issues.slice(0,150).map(i=>`<div class="issue-row"><span class="issue-dot">!</span><div><strong>${esc(i.name)} <span class="provider-host">${esc(i.source)}</span></strong><p>${esc(i.reason)}</p></div><span class="issue-client">${esc(i.client)}</span></div>`).join('')||'<div class="empty-small">No compatibility exceptions for this selection.</div>';if(issues.length>150)$('issue-rows').insertAdjacentHTML('beforeend',`<div class="empty-small">Showing 150 of ${issues.length} notes. Download the combined archive for the full report.</div>`);}
 $('server-search').addEventListener('input',renderServers);$('protocol-filter').addEventListener('change',renderServers);$('client-filter').addEventListener('change',renderServers);$('issue-client').addEventListener('change',renderIssues);
 $('provider-filter').addEventListener('change',renderServers);
-async function refresh(id){try{await api('/refresh'+(id?'?provider_id='+encodeURIComponent(id):''),{method:'POST'});toast('Refreshing subscriptions…');await loadState();}catch(error){toast(error.message);}}
+async function refresh(id){try{await api('/refresh'+(id?'?provider_id='+encodeURIComponent(id):''),{method:'POST'});toast(`Refreshing ${id?(state.providers.find(p=>p.id===id)?.name||'provider'):'all providers'}…`);await loadState();}catch(error){toast(error.message);}}
 $('refresh-button').addEventListener('click',()=>refresh());
 $('connection-filter').addEventListener('change',renderServers);
 $('check-servers').addEventListener('click',async()=>{try{await api('/check-servers',{method:'POST'});toast('Checking saved servers…');await loadState();}catch(error){toast(error.message);}});

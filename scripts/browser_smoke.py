@@ -568,6 +568,48 @@ def main():
                 page.locator('[data-close=hwid-dialog]').first.click()
                 checks.append('desktop and mobile layout, navigation and dialogs')
 
+                # Keep the check open long enough to observe its scope through
+                # real polling, without contacting any external provider/server.
+                extra = {'name': 'Unchanged provider', 'url': 'https://unchanged.example/sub', 'hwid_id': None}
+                preview = manager.test_provider(extra)
+                extra_provider = manager.change_provider({**extra, 'test_token': preview['test_token']})
+                original_checker = manager.checker
+                check_started, release_check = threading.Event(), threading.Event()
+                def held_checker(*args, **kwargs):
+                    check_started.set()
+                    if not release_check.wait(30):
+                        raise RuntimeError('synthetic provider check was not released')
+                    return original_checker(*args, **kwargs)
+                manager.checker = held_checker
+                before_fetch = len(seen)
+                schedules = (manager.next_refresh, manager.next_check)
+                try:
+                    page.set_viewport_size({'width':1440, 'height':1000})
+                    page.locator('.nav-item[data-page=providers]').click()
+                    page.evaluate('loadState()')
+                    active = page.locator('#provider-rows tr').filter(has_text='Renamed provider')
+                    inactive = page.locator('#provider-rows tr').filter(has_text='Unchanged provider')
+                    active.locator('.provider-actions summary').click()
+                    active.locator('[data-action=refresh]').click()
+                    assert check_started.wait(5)
+                    page.evaluate('loadState()')
+                    expect(page.locator('#last-refresh')).to_contain_text('Checking Renamed provider')
+                    expect(active.locator('.provider-check-note')).to_have_text('Checking…')
+                    expect(inactive.locator('.provider-check-note')).to_have_count(0)
+                    assert len(seen) == before_fetch + 1
+                    assert seen[-1] == 'replacement-browser-hwid'
+                finally:
+                    release_check.set()
+                    manager.worker.join(10)
+                    manager.checker = original_checker
+                assert not manager.busy
+                assert (manager.next_refresh, manager.next_check) == schedules
+                page.evaluate('loadState()')
+                expect(page.locator('#activity-rows .activity-row').first).to_contain_text('Renamed provider refreshed')
+                manager.change_provider(provider_id=extra_provider['id'], delete=True)
+                page.evaluate('loadState()')
+                checks.append('single-provider refresh keeps other rows idle, fetches only its saved device and preserves global schedules')
+
                 # Advance only the synthetic authentication clock, without
                 # sleeping or touching real devices / production enrollment.
                 auth_time = [time.time()]

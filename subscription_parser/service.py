@@ -33,6 +33,7 @@ class Manager:
         self.guard = threading.RLock()
         self.busy = False
         self.busy_action = None
+        self.busy_provider_id = None
         self.check_progress = {'done': 0, 'total': 0}
         self.next_refresh = time.time()
         self.next_check = time.time()
@@ -146,13 +147,17 @@ class Manager:
             elif result.get('status') == 'not_installed':
                 self.logs.write('validator_missing', core=core, provider_id=provider_id)
 
-    def log_checks(self, previous, results):
+    def log_checks(self, previous, results, *, changed_only=False):
         counts = Counter()
         for identity, cores in results.items():
             for core, value in cores.items():
                 status = value.get('status')
+                key = value.get('fingerprint')
+                old = (connectivity.matching_result(identity.split(':')[0], core, key, previous) if key
+                       else previous.get(identity, {}).get(core, {}))
+                if changed_only and value == old:
+                    continue
                 counts[status] += 1
-                old = previous.get(identity, {}).get(core, {})
                 if status in {'failed', 'error'} and (status, value.get('reason')) != (old.get('status'), old.get('reason')):
                     self.logs.write('node_error' if status == 'error' else 'node_failed', node_id=identity[:16],
                                     core=core, reason=value.get('reason'))
@@ -160,15 +165,18 @@ class Manager:
                     self.logs.write('node_recovered', node_id=identity[:16], core=core)
         self.logs.write('checks_completed', passed=counts['passed'], failed=counts['failed'], errors=counts['error'])
 
-    def refresh(self, selected=None, download=True, check=None):
+    def refresh(self, selected=None, download=True, check=None, reuse_recent=False):
         started = time.monotonic()
         check = download if check is None else check
         operation = 'refresh' if download else 'connection check' if check else 'configuration update'
         stage = 'fetch'
-        self.logs.write('run_started', operation=operation)
+        self.logs.write('run_started', operation=operation, provider_id=selected)
         try:
             with self.guard:
+                self.busy = True
                 self.busy_action = 'fetching' if download else 'checking' if check else 'updating'
+                self.busy_provider_id = selected
+                self.check_progress = {'done': 0, 'total': 0}
             config = self.store.config()
             sources_key = self.sources_key(config)
             enabled = [p for p in config["providers"] if p["enabled"]]
@@ -210,14 +218,32 @@ class Manager:
                         self.check_progress = {'done': done, 'total': total}
                 previous = results
                 check_entries = [entry for nodes, _ in scopes.values() for entry in connectivity.unique_entries(nodes)]
+                targets = None
+                if selected is not None:
+                    names = {provider['name'] for provider in enabled if provider['id'] == selected}
+                    # Include the selected provider's own native variants, even
+                    # when another provider supplies the default shared variant;
+                    # preserve other providers' exact variants without probing.
+                    check_entries = [entry for nodes, _ in scopes.values() for entry in nodes]
+                    selected_entries = [entry for entry in check_entries if entry.source in names]
+                    targets = set()
+                    for entry in selected_entries:
+                        for core in connectivity.CORES:
+                            if core not in entry.outputs:
+                                continue
+                            try:
+                                targets.add((entry.identity, core, connectivity.fingerprint(entry, core)))
+                            except protocols.Error:
+                                continue
                 results = self.checker(check_entries, self.store.root, stop=self.stop,
-                                       previous=results, progress=progress)
-                self.log_checks(previous, results)
+                                       previous=results, progress=progress, targets=targets,
+                                       reuse_seconds=config['check_seconds'] if reuse_recent else 0)
+                self.log_checks(previous, results, changed_only=True)
             stage = 'publish'
             max_age = config['check_seconds'] * 2
             evaluated_at = time.time()
             generated = common.now()
-            last_check = generated if check else self.snapshot.get('last_check')
+            last_check = generated if check and self.check_progress['total'] else self.snapshot.get('last_check')
             publications, pending = {}, False
             for key, (nodes, validation) in scopes.items():
                 published, waiting = publication.build(nodes, results, max_age, evaluated_at, generated, validation, last_check)
@@ -229,6 +255,9 @@ class Manager:
                      "fresh": sum(s["status"] == "fresh" for s in statuses.values()),
                      "cached": sum(s["status"] == "cached" for s in statuses.values()),
                      "action": "refresh" if download else "connection check" if check else "configuration updated"}
+            if selected is not None:
+                event['provider_id'] = selected
+            event['checked'] = self.check_progress['total']
             snapshot = {k: v for k, v in combined.items() if k not in protocols.TARGETS}
             snapshot.update(providers=statuses, publications=publications, connectivity=results, sources_key=sources_key,
                             history=([event] + self.snapshot.get("history", []))[:20])
@@ -236,8 +265,9 @@ class Manager:
             with self.guard:
                 self.snapshot = snapshot
                 if not check and pending:
-                    # Let consecutive saves in a bulk import finish first.
-                    self.next_check = time.time() + 5
+                    # Batch consecutive saves briefly without postponing an
+                    # already due check. The scheduler reuses recent results.
+                    self.next_check = min(self.next_check, time.time() + 5)
             self.logs.write('run_completed', operation=operation, servers=event['servers'], published=event['published'],
                             cached=event['cached'], seconds=event['seconds'])
         except Exception as error:
@@ -249,31 +279,40 @@ class Manager:
             with self.guard:
                 self.busy = False
                 self.busy_action = None
+                self.busy_provider_id = None
                 config = self.store.config()
-                if download:
+                if download and selected is None:
                     self.next_refresh = time.time() + config['refresh_seconds']
-                if check:
-                    self.next_check = time.time() + config['check_seconds']
+                if check and selected is None:
+                    self.next_check = connectivity.next_check_at(self.snapshot.get('connectivity', {}), config['check_seconds'])
 
-    def begin_refresh(self, selected=None):
+    def begin_refresh(self, selected=None, *, reuse_recent=False):
         with self.guard:
             if self.busy:
                 raise Busy("a refresh is already running")
-            if selected and selected not in {p["id"] for p in self.store.config()["providers"]}:
-                raise common.SubscriptionError("provider does not exist")
+            if selected is not None:
+                provider = next((p for p in self.store.config()['providers'] if p['id'] == selected), None)
+                if provider is None:
+                    raise common.SubscriptionError('provider does not exist')
+                if not provider['enabled']:
+                    raise common.SubscriptionError('provider is paused; enable it before refreshing')
             self.busy = True
             self.busy_action = 'fetching'
-            self.worker = threading.Thread(target=self.refresh, args=(selected,), daemon=True, name="subscription-refresh")
+            self.busy_provider_id = selected
+            self.check_progress = {'done': 0, 'total': 0}
+            self.worker = threading.Thread(target=self.refresh, args=(selected,), kwargs={'reuse_recent': reuse_recent},
+                                           daemon=True, name="subscription-refresh")
             self.worker.start()
 
-    def begin_check(self):
+    def begin_check(self, *, reuse_recent=False):
         with self.guard:
             if self.busy:
                 raise Busy('wait for the current refresh or connection check')
             self.busy = True
             self.busy_action = 'checking'
+            self.busy_provider_id = None
             self.check_progress = {'done': 0, 'total': 0}
-            self.worker = threading.Thread(target=self.refresh, kwargs={'download': False, 'check': True},
+            self.worker = threading.Thread(target=self.refresh, kwargs={'download': False, 'check': True, 'reuse_recent': reuse_recent},
                                            daemon=True, name='server-check')
             self.worker.start()
 
@@ -448,9 +487,9 @@ class Manager:
                 check_due = not self.busy and time.time() >= self.next_check
             try:
                 if due:
-                    self.begin_refresh()
+                    self.begin_refresh(reuse_recent=True)
                 elif check_due:
-                    self.begin_check()
+                    self.begin_check(reuse_recent=True)
             except Busy:
                 pass
             except Exception as error:
@@ -476,6 +515,7 @@ class Manager:
                 "providers": providers, "hwids": self.store.hwids(), "busy": self.busy,
                 "refresh_seconds": config["refresh_seconds"], "next_refresh": self.next_refresh,
                 "check_seconds": config['check_seconds'], "next_check": self.next_check,
-                "busy_action": self.busy_action, "check_progress": self.check_progress,
+                "busy_action": self.busy_action, "busy_provider_id": self.busy_provider_id,
+                "check_progress": self.check_progress,
                 "subscriptions": subscriptions,
                 "links": next(s['links'] for s in subscriptions if s['id'] == 'default')}

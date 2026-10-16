@@ -108,11 +108,11 @@ when created or replaced; there is no endpoint to reveal them later.
 | GET | `/healthz` | Public process-health response: `{"status":"ok"}`. `/health` is an alias. |
 | GET | `/api/state` | Dashboard inventory, providers, masked devices, subscriptions, counts, schedules, and job progress. |
 | GET | `/api/logs?level=all` | Latest 200 matching debug events. `level` is `all`, `warning`, or `error`. |
-| POST | `/api/refresh` | Starts a provider refresh; optional `provider_id` query parameter selects one provider. Returns HTTP 202. |
-| POST | `/api/check-servers` | Starts checks from cached configurations without upstream fetches. Returns HTTP 202. |
+| POST | `/api/refresh` | Downloads and checks all enabled providers, or only the provider selected by `provider_id`. A selected refresh preserves other providers' results and global schedules. Paused/unknown IDs return HTTP 400; accepted jobs return HTTP 202. |
+| POST | `/api/check-servers` | Explicitly rechecks all cached configurations without upstream fetches, including recently checked servers. Returns HTTP 202. |
 | PUT | `/api/settings` | Updates `refresh_seconds`, `check_seconds`, or both; each is 300–86400. |
 
-Poll `/api/state` for `busy`, `busy_action`, and `check_progress` after starting
+Poll `/api/state` for `busy`, `busy_action`, `busy_provider_id`, and `check_progress` after starting
 a job. A queued request is not a completed check. Changes that conflict with a
 running job return HTTP 409.
 

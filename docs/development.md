@@ -72,6 +72,10 @@ and Hiddify processes tunnel HTTPS through local VLESS, VMess, Shadowsocks, and
 Trojan fixtures, including rejected credentials, dead servers, invalid TLS,
 unexpected HTTP responses, and process cleanup.
 
+Refresh regression cases verify single-provider downloads/checks, preserved
+results and schedules for other providers, shared native variants, changed and
+failed responses, incremental background checks, and explicit full rechecks.
+
 ### Production-container checks
 
 Build a dedicated test image and run the Docker smoke script. The script requires
@@ -113,6 +117,8 @@ authenticator setup, recovery, and login throttling. Provider checks include
 working/client counts, shared servers, pending/expired/failed checks, action menus,
 keyboard focus during polling, and mobile filtering. They do not change the live
 deployment.
+The suite also holds a single-provider check open to verify that its progress
+names the selected provider while other rows remain idle.
 
 Repeat with `PARSER_TEST_ENGINE=firefox` or `webkit` and separate artifact folders.
 The image's unprivileged user has the writable home Firefox requires. Results are

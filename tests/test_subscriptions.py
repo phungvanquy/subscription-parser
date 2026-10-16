@@ -57,6 +57,132 @@ class SubscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return {s['id']: s for s in response.json()['subscriptions']}
 
+    def test_provider_refresh_only_downloads_and_checks_its_own_servers(self):
+        self.create('Beta only', self.providers[1:2])
+        provider = self.providers[0]
+        before = copy.deepcopy(self.manager.snapshot)
+        deadlines = (time.time() + 1800, time.time() + 300)
+        self.manager.next_refresh, self.manager.next_check = deadlines
+        selected_ids = {node['id'] for node in before['inventory'] if provider['name'] in node['sources']}
+        expected = {(identity, core) for identity, values in before['connectivity'].items()
+                    if identity[:16] in selected_ids for core in values}
+        self.fetches.clear(); self.checks.clear()
+        response = self.client.post('/api/refresh', params={'provider_id': provider['id']})
+        self.assertEqual(response.status_code, 202)
+        self.manager.worker.join(5)
+        self.assertFalse(self.manager.busy)
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(self.fetches, ['https://Alpha.example/private'])
+        self.assertEqual(set(self.checks), expected)
+        self.assertEqual(len(self.checks), 6)  # Alpha's own node plus the shared node, in three cores.
+        for identity, values in before['connectivity'].items():
+            if identity[:16] not in selected_ids:
+                self.assertEqual(self.manager.snapshot['connectivity'][identity], values)
+        self.assertEqual((self.manager.next_refresh, self.manager.next_check), deadlines)
+        self.assertEqual(self.manager.snapshot['history'][0]['provider_id'], provider['id'])
+        self.assertEqual(self.groups()['default']['published_total'], 4)
+        checked = next(row['context'] for row in self.manager.logs.recent()['entries'] if row['event'] == 'checks_completed')
+        self.assertEqual(checked['passed'], 6)
+
+    def test_saving_a_tested_provider_checks_only_missing_results_in_background(self):
+        before = copy.deepcopy(self.manager.snapshot['connectivity'])
+        next_due = min(value['checked_ts'] for values in before.values() for value in values.values()) + 600
+        self.fetches.clear(); self.checks.clear()
+        body = {'name': 'Delta', 'url': 'https://Delta.example/private', 'hwid_id': None}
+        preview = self.client.post('/api/providers/test', json=body)
+        self.assertEqual(preview.status_code, 200)
+        saved = self.client.post('/api/providers', json={**body, 'test_token': preview.json()['test_token']})
+        self.assertEqual(saved.status_code, 201)
+        self.assertEqual(self.checks, [])
+        self.manager.begin_check(reuse_recent=True)
+        self.manager.worker.join(5)
+        self.assertFalse(self.manager.busy)
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(self.fetches, ['https://Delta.example/private'])
+        self.assertEqual(len(self.checks), 3)
+        self.assertTrue(all(identity not in before for identity, _ in self.checks))
+        for identity, values in before.items():
+            self.assertEqual(self.manager.snapshot['connectivity'][identity], values)
+        self.assertAlmostEqual(self.manager.next_check, next_due, places=2)
+        self.assertEqual(self.manager.check_progress, {'done': 3, 'total': 3})
+
+    def test_paused_or_unknown_provider_refresh_cannot_start_global_work(self):
+        provider = self.providers[0]
+        self.client.put('/api/providers/' + provider['id'], json={'name': 'Alpha', 'enabled': False})
+        self.fetches.clear(); self.checks.clear()
+        for identifier in (provider['id'], 'missing', ''):
+            with self.subTest(identifier=identifier):
+                response = self.client.post('/api/refresh', params={'provider_id': identifier})
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(self.manager.busy)
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.checks, [])
+
+    def test_changed_or_failed_provider_response_never_rechecks_unrelated_nodes(self):
+        provider = self.providers[0]
+        original = self.manager.fetcher
+        def changed(url, *args):
+            body, metadata = original(url, *args)
+            document = json.loads(body)
+            document['outbounds'] = document['outbounds'][:1]
+            document['outbounds'][0]['server_port'] = 8443
+            return json.dumps(document).encode(), metadata
+        unrelated = {node['id'] for node in self.manager.snapshot['inventory'] if provider['name'] not in node['sources']}
+        before = copy.deepcopy(self.manager.snapshot['connectivity'])
+        self.fetches.clear(); self.checks.clear()
+        self.manager.fetcher = changed
+        self.manager.refresh(selected=provider['id'])
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(self.fetches, ['https://Alpha.example/private'])
+        self.assertEqual(len(self.checks), 3)
+        self.assertTrue(all(identity not in before for identity, _ in self.checks))
+        self.assertEqual(self.groups()['default']['published_total'], 4)
+        new_records = copy.deepcopy(self.manager.snapshot['connectivity'])
+        for identity in unrelated:
+            key = next(key for key in before if key[:16] == identity)
+            self.assertEqual(new_records[key], before[key])
+        self.checks.clear()
+        with patch.object(self.manager, 'fetcher', side_effect=common.SubscriptionError('provider returned HTTP 503')):
+            self.manager.refresh(selected=provider['id'])
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(len(self.checks), 3)
+        self.assertEqual(self.manager.snapshot['providers'][provider['id']]['status'], 'cached')
+        for identity in unrelated:
+            key = next(key for key in before if key[:16] == identity)
+            self.assertEqual(self.manager.snapshot['connectivity'][key], before[key])
+
+    def test_metadata_edits_preserve_checks_and_explicit_full_operations_recheck_everything(self):
+        self.fetches.clear(); self.checks.clear()
+        self.manager.next_check = time.time() + 300
+        deadline = self.manager.next_check
+        provider = self.providers[0]
+        self.client.put('/api/providers/' + provider['id'], json={'name': 'Renamed Alpha'})
+        self.create('Alpha selection', [provider])
+        self.assertEqual(self.fetches, [])
+        self.assertEqual(self.checks, [])
+        self.assertEqual(self.manager.next_check, deadline)
+        self.manager.begin_check()
+        self.manager.worker.join(5)
+        self.assertEqual(len(self.checks), 12)
+        self.assertEqual(self.fetches, [])
+        self.checks.clear()
+        self.manager.refresh()
+        self.assertEqual(len(self.fetches), 3)
+        self.assertEqual(len(self.checks), 12)
+
+    def test_scheduled_refresh_reuses_recent_checks_after_downloading(self):
+        before = copy.deepcopy(self.manager.snapshot['connectivity'])
+        next_due = min(value['checked_ts'] for values in before.values() for value in values.values()) + 600
+        self.fetches.clear(); self.checks.clear()
+        self.manager.begin_refresh(reuse_recent=True)
+        self.manager.worker.join(5)
+        self.assertFalse(self.manager.busy)
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(len(self.fetches), 3)
+        self.assertEqual(self.checks, [])
+        self.assertEqual(self.manager.snapshot['connectivity'], before)
+        self.assertAlmostEqual(self.manager.next_check, next_due, places=2)
+
     def test_restart_labels_saved_uri_counts_until_native_feed_is_built(self):
         self.create('Scoped', self.providers[:1])
         snapshot = copy.deepcopy(self.manager.snapshot)
@@ -262,6 +388,18 @@ class SubscriptionTests(unittest.TestCase):
         response = self.client.get(group['links']['xray.json']).json()
         self.assertTrue(any(node.get('mux', {}).get('enabled') for node in response['outbounds']))
         self.assertTrue(any(':' in key for key in self.manager.snapshot['connectivity']))
+        previous = copy.deepcopy(self.manager.snapshot['connectivity'])
+        variant_key = next(key for key in previous if ':' in key and 'xray' in previous[key])
+        primary_key = variant_key.split(':')[0]
+        self.fetches.clear(); self.checks.clear()
+        self.manager.refresh(selected=self.providers[1]['id'])
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(self.fetches, ['https://Beta.example/private'])
+        self.assertEqual(len(self.checks), 6)
+        self.assertEqual(self.manager.snapshot['connectivity'][primary_key]['xray'], previous[primary_key]['xray'])
+        self.assertGreater(self.manager.snapshot['connectivity'][variant_key]['xray']['checked_ts'],
+                           previous[variant_key]['xray']['checked_ts'])
+        self.assertEqual(self.groups()[beta]['counts']['xray'], 2)
 
     def test_validation_rejection_in_another_scope_does_not_remove_selected_native_variant(self):
         from subscription_parser.validation import checked_combine

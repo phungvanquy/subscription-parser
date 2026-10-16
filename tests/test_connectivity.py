@@ -117,6 +117,79 @@ class ConnectivityTests(unittest.TestCase):
         self.assertEqual(hiddify['route']['rules'], [{'inbound': ['probe-in'], 'action': 'route', 'outbound': 'probe'}])
         self.assertFalse(any(node.get('type') == 'direct' for node in hiddify['outbounds']))
 
+    def test_background_checks_reuse_recent_success_failure_and_error_without_changing_timestamps(self):
+        for status in ('passed', 'failed', 'error'):
+            with self.subTest(status=status):
+                previous = self.records(lambda *args: c.result(status))
+                progress = []
+                values = c.check_entries(self.nodes, self.root, previous=previous, reuse_seconds=600,
+                    tester=lambda *args: self.fail('recent results must not be probed'),
+                    progress=lambda done, total: progress.append((done, total)))
+                self.assertEqual(values, previous)
+                self.assertEqual(progress, [(0, 0)])
+
+    def test_background_checks_only_probe_due_missing_future_and_changed_results(self):
+        previous = self.records()
+        now = time.time()
+        previous[self.nodes[0].identity]['mihomo']['checked_ts'] = now - 600
+        previous[self.nodes[0].identity]['xray']['checked_ts'] = now + 10
+        previous[self.nodes[1].identity].pop('hiddify')
+        changed = copy.deepcopy(self.nodes)
+        changed[1].outputs['xray']['mux'] = {'enabled': True, 'concurrency': 8}
+        calls = []
+        def tester(node, core, *args):
+            calls.append((node.identity, core))
+            return c.result('passed')
+        values = c.check_entries(changed, self.root, previous=previous, reuse_seconds=600, tester=tester)
+        self.assertEqual(set(calls), {(changed[0].identity, 'mihomo'), (changed[0].identity, 'xray'),
+                                      (changed[1].identity, 'hiddify'), (changed[1].identity, 'xray')})
+        self.assertEqual(values[changed[0].identity]['hiddify'], previous[changed[0].identity]['hiddify'])
+        self.assertEqual(values[changed[1].identity]['mihomo'], previous[changed[1].identity]['mihomo'])
+
+    def test_scoped_checks_preserve_other_results_and_their_expiration(self):
+        previous = self.records(lambda *args: c.result('passed'))
+        core = 'xray'
+        targets = {(self.nodes[0].identity, core, c.fingerprint(self.nodes[0], core))}
+        calls = []
+        def tester(node, target, *args):
+            calls.append((node.identity, target))
+            return c.result('failed')
+        values = c.check_entries(self.nodes, self.root, previous=previous, targets=targets, tester=tester)
+        self.assertEqual(calls, [(self.nodes[0].identity, core)])
+        self.assertEqual(values[self.nodes[1].identity], previous[self.nodes[1].identity])
+        self.assertEqual(values[self.nodes[0].identity][core]['status'], 'failed')
+        future = max(v['checked_ts'] for v in previous[self.nodes[1].identity].values()) + 1201
+        self.assertFalse(c.filtered_entries([self.nodes[1]], values, 1200, now=future)[0].outputs)
+
+    def test_variant_reordering_preserves_exact_results_for_scoped_and_deferred_checks(self):
+        first = self.nodes[0]
+        second = copy.deepcopy(first)
+        second.outputs['xray']['mux'] = {'enabled': True, 'concurrency': 8}
+        previous = c.check_entries([first, second], self.root,
+            tester=lambda node, core, *args: c.result('failed' if 'mux' in node.outputs.get(core, {}) else 'passed'))
+        for options in ({'targets': set()}, {'reuse_seconds': 600}):
+            with self.subTest(options=options):
+                values = c.check_entries([second, first], self.root, previous=previous,
+                    tester=lambda *args: self.fail('must reuse the exact variant'), **options)
+                for node in (first, second):
+                    self.assertEqual(c.current_result(node, 'xray', values, 1200),
+                                     c.current_result(node, 'xray', previous, 1200))
+        with patch.object(c, 'BATCH_TIMEOUT', 0):
+            values = c.check_entries([second, first], self.root, previous=previous)
+        self.assertEqual(c.current_result(first, 'xray', values, 1200)['status'], 'passed')
+        self.assertEqual(c.current_result(second, 'xray', values, 1200)['status'], 'pending')
+
+    def test_next_check_uses_oldest_remaining_result_and_backs_off_pending_work(self):
+        results = {'one': {'xray': {'status': 'passed', 'checked_ts': 100},
+                           'mihomo': {'status': 'failed', 'checked_ts': 150},
+                           'hiddify': {'status': 'unsupported'}}}
+        self.assertEqual(c.next_check_at(results, 600, now=200), 700)
+        results['one']['xray'] = {'status': 'pending'}
+        self.assertEqual(c.next_check_at(results, 600, now=200), 205)
+        results['one']['xray'] = {'status': 'passed', 'checked_ts': 250}
+        self.assertEqual(c.next_check_at(results, 600, now=200), 205)
+        self.assertEqual(c.next_check_at({}, 600, now=200), 800)
+
 
 class ConnectivityWebTests(unittest.TestCase):
     def setUp(self):
