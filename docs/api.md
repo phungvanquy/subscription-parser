@@ -203,7 +203,11 @@ subscription rebuilds publications from cached responses without fetching provid
 
 `GET /sub/{token}/{filename}` requires the subscription token in the URL and does
 not use admin cookies or interactive 2FA. Supported filenames are `hiddify.json`,
-`mihomo.yaml`, `xray.json`, `v2board.txt`, and `combined.json`.
+`mihomo.yaml`, `xray.json`, `v2board.json`, `v2board.txt`, and `combined.json`.
+
+`counts.v2board` describes the native JSON feed; `counts.v2board_uri` describes
+the legacy URI feed. Both appear separately in inventory compatibility and
+diagnostics. The [V2Board JSON contract](v2board-json.md) defines its payload.
 
 Responses use JSON, YAML, or plain-text media types as appropriate. They include
 `profile-title` and `profile-update-interval` headers and `Cache-Control: no-store`.

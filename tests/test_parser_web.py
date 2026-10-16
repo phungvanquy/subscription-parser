@@ -166,7 +166,7 @@ class WebTests(unittest.TestCase):
         self.refresh()
         self.assertEqual([i[1] for i in self.seen], ["authorized-device-id"] * 2)
         state = self.client.get("/api/state").json()
-        self.assertEqual(state["counts"], {"hiddify": 1, "mihomo": 1, "xray": 1, "v2board": 1})
+        self.assertEqual(state["counts"], {"hiddify": 1, "mihomo": 1, "xray": 1, "v2board": 1, "v2board_uri": 1})
         public = json.dumps(state)
         for secret in ["authorized-device-id", "private-token", UUID, self.token]:
             self.assertNotIn(secret, public)

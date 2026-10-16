@@ -45,6 +45,18 @@ class Manager:
             "exports": {}, "history": [], "duplicates_removed": 0}
         if self.snapshot.get('generated_at'):
             self.next_refresh = time.time() + self.store.config()['refresh_seconds']
+        # A saved pre-JSON publication uses "v2board" for its URI count.
+        # Keep those feeds available with correct labels until the first check.
+        for saved in [self.snapshot, *self.snapshot.get('publications', {}).values()]:
+            counts = saved.get('counts', {})
+            if 'v2board_uri' not in counts and 'v2board.txt' in saved.get('exports', {}):
+                counts['v2board_uri'] = counts.pop('v2board', 0)
+                counts['v2board'] = 0
+                for server in saved.get('inventory', []):
+                    server['clients'] = ['v2board_uri' if client == 'v2board' else client for client in server['clients']]
+                for note in saved.get('diagnostics', []):
+                    if note.get('client') == 'v2board':
+                        note['client'] = 'v2board_uri'
         if self.snapshot.get('connectivity_policy') != connectivity.POLICY_VERSION:
             # Legacy exports have never been connection-tested. Do not publish
             # them during the first background check after an upgrade.
@@ -453,7 +465,7 @@ class Manager:
             providers = [self.store.public_provider(p) | snapshot.get("providers", {}).get(p["id"], {"status": "pending", "count": 0, "protocols": {}}) for p in config["providers"]]
             public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications", "sources_key"}}
             if not self.publication_current(snapshot):
-                public['counts'] = {target: 0 for target in (*protocols.TARGETS, 'v2board')}
+                public['counts'] = {target: 0 for target in (*protocols.TARGETS, 'v2board', 'v2board_uri')}
                 public['published_total'] = 0
                 public['inventory'] = [{**server, 'clients': [], 'connectivity': {
                     core: {**value, 'status': 'stale', 'reason': 'Connection check expired'}

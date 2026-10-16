@@ -103,7 +103,7 @@ def main():
         for link in state['links'].values():
             with urllib.request.urlopen(link, timeout=10) as response:
                 assert response.status == 200 and UUID.encode() in response.read()
-        checks.append('healthy production container serves all five feeds after real Mihomo/Xray HTTPS checks through the local VLESS fixture')
+        checks.append('healthy production container serves all six feeds after real Mihomo/Xray HTTPS checks through the local VLESS fixture')
         saved = api('/api/hwids', 'POST', {'name': 'Second device', 'value': 'docker-second-authorized-id'})
         api('/api/settings', 'PUT', {'refresh_seconds': 600}, proxy=True)
         checks.append('HWID writes and HTTPS reverse-proxy requests work with the writable data volume')

@@ -217,6 +217,15 @@ def main():
                 assert len(response.json()['outbounds']) == 2
                 checks.append('copy a usable subscription link and download combined JSON')
 
+                page.locator('[data-copy="v2board.json"]').click()
+                expect(page.locator('#toast')).to_contain_text('copied')
+                native_link = page.evaluate('navigator.clipboard.readText()')
+                response = page.request.get(native_link)
+                assert response.status == 200
+                assert response.json()['format'] == 'subscription-parser'
+                assert len(response.json()['nodes']) == 2
+                checks.append('copy and fetch the native V2Board JSON subscription')
+
                 page.locator('[data-copy="v2board.txt"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
                 v2board_link = page.evaluate('navigator.clipboard.readText()')

@@ -126,7 +126,7 @@ class ConnectivityWebTests(unittest.TestCase):
         state = self.refresh()
         self.assertEqual(state['total'], 2)
         self.assertEqual(state['published_total'], 1)
-        self.assertEqual(state['counts'], {'hiddify': 1, 'mihomo': 1, 'xray': 1, 'v2board': 1})
+        self.assertEqual(state['counts'], {'hiddify': 1, 'mihomo': 1, 'xray': 1, 'v2board': 1, 'v2board_uri': 1})
         self.assertNotIn('connectivity', state)
         for name, link in state['links'].items():
             response = self.client.get(link)

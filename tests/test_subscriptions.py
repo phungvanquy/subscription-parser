@@ -57,6 +57,22 @@ class SubscriptionTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return {s['id']: s for s in response.json()['subscriptions']}
 
+    def test_restart_labels_saved_uri_counts_until_native_feed_is_built(self):
+        self.create('Scoped', self.providers[:1])
+        snapshot = copy.deepcopy(self.manager.snapshot)
+        for saved in [snapshot, *snapshot.get('publications', {}).values()]:
+            saved['exports'].pop('v2board.json')
+            saved['counts']['v2board'] = saved['counts'].pop('v2board_uri')
+            for server in saved['inventory']:
+                server['clients'] = [client for client in server['clients'] if client != 'v2board_uri']
+        common.atomic_write(self.manager.snapshot_path, common.json_text(snapshot))
+        restarted = create_app(self.root, start_scheduler=False).state.manager
+        for saved in [restarted.snapshot, *restarted.snapshot.get('publications', {}).values()]:
+            self.assertEqual(saved['counts']['v2board'], 0)
+            self.assertGreater(saved['counts']['v2board_uri'], 0)
+            self.assertTrue(all('v2board' not in server['clients'] for server in saved['inventory']))
+        self.assertEqual(restarted.snapshot['exports']['v2board.txt'], snapshot['exports']['v2board.txt'])
+
     def assert_feeds(self, group, hosts, sources):
         for file, link in group['links'].items():
             response = self.client.get(link)
@@ -68,6 +84,8 @@ class SubscriptionTests(unittest.TestCase):
                 self.assertEqual({source for node in archive['servers'] for source in node['sources']}, sources)
                 self.assertTrue(all(note['source'] in sources for note in archive['diagnostics']))
                 actual = {n['server'] for n in archive['hiddify']['outbounds']}
+            elif file == 'v2board.json':
+                actual = {n['server'] for n in response.json()['nodes']}
             elif file == 'hiddify.json':
                 actual = {n['server'] for n in response.json()['outbounds']}
             elif file == 'mihomo.yaml':

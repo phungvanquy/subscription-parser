@@ -60,7 +60,7 @@ PARSER_IMAGE=subscription-parser:smoke python3 scripts/docker_smoke.py
 ```
 
 The script creates an isolated Compose project with synthetic credentials and a
-temporary volume. It checks migration, HWIDs, all five output formats, proxy
+temporary volume. It checks migration, HWIDs, all six output formats, proxy
 headers, scoped subscriptions, token rotation, authentication, and container
 replacement. Real Mihomo/Xray checks run through a local VLESS fixture and HTTPS
 origin with a temporary certificate. The script removes its own test resources.
@@ -105,6 +105,7 @@ secrets. Browser checks are currently a separate, optional local check.
 | `subscription_parser/fetch.py` | HTTPS retrieval with explicit device assignments. |
 | `subscription_parser/protocols.py` | Input parsing and client-format adapters. |
 | `subscription_parser/hysteria.py`, `xray_transports.py`, `v2board.py` | Protocol- and integration-specific conversions. |
+| `subscription_parser/v2board_native.py` | Bounded, versioned native V2Board JSON export. |
 | `subscription_parser/connectivity.py` | Isolated Mihomo/Xray HTTPS checks and freshness policy. |
 | `subscription_parser/publication.py` | Scoped output feeds and diagnostic archives. |
 | `subscription_parser/debug_log.py` | Private event logging and retention. |
@@ -114,6 +115,12 @@ secrets. Browser checks are currently a separate, optional local check.
 | `docs/` | Usage, deployment, security, operations, and API documentation. |
 
 ## Bundled client cores
+
+The synthetic `tests/fixtures/v2board-native-v1.json` fixture is shared with the
+V2Board importer tests. Parser tests require the generated feed to match it.
+Update both repositories when intentionally changing the contract. Regression
+cases cover custom headers, heartbeat settings, mux/XUDP, QUIC options,
+dependency references, stale checks, and unsafe configuration fields.
 
 The version, release asset, and SHA256 digest for each architecture are pinned in
 [`scripts/client-cores.lock.json`](../scripts/client-cores.lock.json).

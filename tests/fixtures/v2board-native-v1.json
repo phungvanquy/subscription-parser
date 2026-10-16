@@ -1,0 +1,688 @@
+{
+  "format": "subscription-parser",
+  "schema_version": 1,
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "valid_until": 1767226800,
+  "nodes": [
+    {
+      "id": "503a5449f68180bf48ff2ecdea9d9cc26826347a75393565be2d63a85b1b93f8",
+      "name": "[503a5449f681] Hysteria 1 · Synthetic provider",
+      "protocol": "hysteria2",
+      "server": "hy0.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "hysteria2",
+            "server": "hy0.example.com",
+            "server_port": 443,
+            "password": "synthetic:password",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "hysteria2",
+            "server": "hy0.example.com",
+            "port": 443,
+            "password": "synthetic:password",
+            "sni": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "hysteria",
+            "settings": {
+              "version": 2,
+              "address": "hy0.example.com",
+              "port": 443
+            },
+            "streamSettings": {
+              "network": "hysteria",
+              "security": "tls",
+              "hysteriaSettings": {
+                "version": 2,
+                "auth": "synthetic:password"
+              },
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              },
+              "finalmask": {
+                "quicParams": {
+                  "congestion": "bbr",
+                  "debug": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray QUIC congestion tuning uses the destination client's defaults"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "69d4e289f783f8d8d787b90df79373983a54b49debbc30a1291cf1cff593989c",
+      "name": "[69d4e289f783] Hysteria 2 · Synthetic provider",
+      "protocol": "hysteria2",
+      "server": "hy1.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "hysteria2",
+            "server": "hy1.example.com",
+            "server_port": 443,
+            "password": "synthetic:password",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "hysteria2",
+            "server": "hy1.example.com",
+            "port": 443,
+            "password": "synthetic:password",
+            "sni": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "hysteria",
+            "settings": {
+              "version": 2,
+              "address": "hy1.example.com",
+              "port": 443
+            },
+            "streamSettings": {
+              "network": "hysteria",
+              "security": "tls",
+              "hysteriaSettings": {
+                "version": 2,
+                "auth": "synthetic:password"
+              },
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              },
+              "finalmask": {
+                "quicParams": {
+                  "congestion": "bbr",
+                  "debug": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray QUIC congestion tuning uses the destination client's defaults"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "05e34515fd7103a9bce55b5159aeff2f17954f88941cd261b201ee96878c7706",
+      "name": "[05e34515fd71] VLESS 1 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless0.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless0.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "transport": {
+              "type": "ws",
+              "path": "/private-path",
+              "headers": {
+                "X-Whitelist-Header": "synthetic-header-secret"
+              }
+            },
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com",
+              "alpn": [
+                "http/1.1"
+              ]
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless0.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "alpn": [
+              "http/1.1"
+            ],
+            "network": "ws",
+            "ws-opts": {
+              "path": "/private-path",
+              "headers": {
+                "X-Whitelist-Header": "synthetic-header-secret"
+              }
+            },
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless0.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "ws",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              },
+              "wsSettings": {
+                "path": "/private-path",
+                "headers": {
+                  "X-Whitelist-Header": "synthetic-header-secret"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "notes": [],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "32df5e8ea01ad4e973b5845562e330156d5d630c94920e1d2fc0141a56524258",
+      "name": "[32df5e8ea01a] VLESS 2 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless1.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless1.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "transport": {
+              "type": "ws",
+              "path": "/private-path",
+              "headers": {
+                "X-Whitelist-Header": "synthetic-header-secret"
+              }
+            },
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com",
+              "alpn": [
+                "http/1.1"
+              ]
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless1.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "alpn": [
+              "http/1.1"
+            ],
+            "network": "ws",
+            "ws-opts": {
+              "path": "/private-path",
+              "headers": {
+                "X-Whitelist-Header": "synthetic-header-secret"
+              }
+            },
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless1.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "ws",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              },
+              "wsSettings": {
+                "path": "/private-path",
+                "headers": {
+                  "X-Whitelist-Header": "synthetic-header-secret"
+                },
+                "heartbeatPeriod": 15
+              }
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray WebSocket heartbeatPeriod tuning omitted; Hiddify uses its own keepalive"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "660c82e58df51bed43cd1035aa72acf4ae3dddfd4eb457587078a9903fc957c0",
+      "name": "[660c82e58df5] VLESS 3 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless2.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless2.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless2.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless2.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "tcp",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              }
+            },
+            "mux": {
+              "enabled": true,
+              "concurrency": 8,
+              "xudpConcurrency": 16,
+              "xudpProxyUDP443": "reject"
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray mux/XUDP tuning uses the destination client's defaults"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "f9e6bfa7efb0c38de9adaf941326ee00adfbe2a41cb4b483a04480ef205ac61e",
+      "name": "[f9e6bfa7efb0] VLESS 4 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless3.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless3.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless3.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless3.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "tcp",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              }
+            },
+            "mux": {
+              "enabled": true,
+              "concurrency": 8,
+              "xudpConcurrency": 16,
+              "xudpProxyUDP443": "reject"
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray mux/XUDP tuning uses the destination client's defaults"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "5edd96ed13f4aaff0008e37823dbdbd21d4d01fc826f421fb8e0dafe38eeb48f",
+      "name": "[5edd96ed13f4] VLESS 5 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless4.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless4.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless4.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless4.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "tcp",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              }
+            },
+            "mux": {
+              "enabled": true,
+              "concurrency": 8,
+              "xudpConcurrency": 16,
+              "xudpProxyUDP443": "reject"
+            }
+          }
+        ]
+      },
+      "notes": [
+        "Xray mux/XUDP tuning uses the destination client's defaults"
+      ],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      }
+    },
+    {
+      "id": "d0b2fa68f51350d369eaab2792c79881b9faab210641ed9718f40752d8d0405e",
+      "name": "[d0b2fa68f513] VLESS 6 · Synthetic provider",
+      "protocol": "vless",
+      "server": "vless5.example.com",
+      "port": 443,
+      "configs": {
+        "hiddify": [
+          {
+            "type": "vless",
+            "server": "vless5.example.com",
+            "server_port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "tls": {
+              "enabled": true,
+              "server_name": "tls.example.com"
+            },
+            "packet_encoding": "xudp",
+            "tag": "node"
+          }
+        ],
+        "mihomo": [
+          {
+            "type": "vless",
+            "server": "vless5.example.com",
+            "port": 443,
+            "uuid": "11111111-2222-4333-8444-555555555555",
+            "packet-encoding": "xudp",
+            "tls": true,
+            "servername": "tls.example.com",
+            "name": "node"
+          }
+        ],
+        "xray": [
+          {
+            "tag": "node",
+            "protocol": "vless",
+            "settings": {
+              "vnext": [
+                {
+                  "address": "vless5.example.com",
+                  "port": 443,
+                  "users": [
+                    {
+                      "id": "11111111-2222-4333-8444-555555555555",
+                      "encryption": "none"
+                    }
+                  ]
+                }
+              ]
+            },
+            "streamSettings": {
+              "network": "tcp",
+              "security": "tls",
+              "tlsSettings": {
+                "serverName": "tls.example.com"
+              }
+            }
+          }
+        ]
+      },
+      "notes": [],
+      "checks": {
+        "mihomo": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        },
+        "xray": {
+          "status": "passed",
+          "checked_at": "2026-01-01T00:00:00+00:00",
+          "latency_ms": 12
+        }
+      },
+      "uri": "vless://11111111-2222-4333-8444-555555555555@vless5.example.com:443?encryption=none&type=tcp&security=tls&sni=tls.example.com#%5Bd0b2fa68f513%5D%20VLESS%206%20%C2%B7%20Synthetic%20provider"
+    }
+  ]
+}

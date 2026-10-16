@@ -66,7 +66,7 @@ Open **Subscriptions → New subscription**, enter a name, and choose either:
 - One or more specific providers, which keeps that selection even when a provider
   is renamed. Paused providers remain selected but contribute no servers.
 
-There is no fixed limit on the number of output subscriptions. Each has five
+There is no fixed limit on the number of output subscriptions. Each has six
 independent client URLs. Creating or editing a selection uses cached responses
 and shared check results; it does not fetch upstream subscriptions or register
 devices. Distinct selections require local conversion, validation, and export
@@ -111,7 +111,8 @@ subscription and should be kept private.
 | Hiddify | `hiddify.json` | Native Hiddify/sing-box outbounds. |
 | Mihomo | `mihomo.yaml` | Proxies, selection group, and routing rule; also usable as a proxy-provider feed. |
 | Xray | `xray.json` | Outbounds and their dependencies; integrate these into your client's configuration. |
-| V2Board External Subscriptions | `v2board.txt` | Plain, newline-separated proxy share links. |
+| V2Board External Subscriptions | `v2board.json` | Versioned native proxy configurations and connection-check metadata. Requires the updated V2Board importer. |
+| Legacy V2Board / URI clients | `v2board.txt` | Plain, newline-separated proxy share links. |
 | Diagnostics or integration | `combined.json` | Schema-version-2 archive containing client configurations, published servers, excluded-server metadata, and compatibility notes. |
 
 The Xray export is not a complete operating-system proxy setup. The combined
@@ -119,22 +120,37 @@ archive is not a universal client import format.
 
 ### V2Board External Subscriptions
 
-For a V2Board installation with the External Subscriptions integration:
+For a V2Board installation with the native JSON External Subscriptions integration:
 
-1. Copy the **V2Board** URL from the selected subscription.
-2. Paste it into **Advanced Settings → External Subscriptions** in V2Board.
-3. Assign the allowed user groups, save, and choose **Refresh now**.
+1. Update V2Board before switching an existing source to JSON.
+2. Copy the **V2Board** JSON URL from the selected subscription.
+3. Paste it into **Advanced Settings → External Subscriptions** in V2Board.
+4. Assign the allowed user groups, save, and choose **Refresh now**.
 
-Use `v2board.txt`, rather than the combined JSON archive. Upstream provider
-fetches remain the responsibility of Subscription Parser and use its saved HWIDs.
+Use `v2board.json` for the updated integration. Upstream provider fetches remain
+the responsibility of Subscription Parser and use its saved HWIDs. The combined
+archive is a different schema and is not a V2Board input.
 
-This feed includes supported VLESS, VMess, Trojan, Shadowsocks, Hysteria v1, and
-Hysteria2 share links. It is limited to **500 entries**, **1 MiB total**, and
-**16 KiB per entry**. Unsupported protocols and unrepresentable settings are
-listed under **Compatibility notes → V2Board**. TUIC and AnyTLS are excluded from
-this integration even when a V2Board installation supports them as managed nodes.
-Advanced transport links may be retained for URI clients while being omitted
-from V2Board's structured Mihomo/sing-box exports.
+JSON preserves accepted native settings, including custom WebSocket headers,
+client-specific options, and outbound dependencies. V2Board uses each client's
+available configuration without converting it back through a share link. User
+group access and the **Backup (manual)** selection policy still apply.
+
+Client counts can differ. Hiddify can receive native XHTTP configurations that
+standard sing-box cannot use. Xray JSON is available in the admin configuration
+viewer; URI clients such as V2rayNG still receive only nodes with a portable URI.
+The integration does not turn those clients into native JSON consumers.
+
+The JSON feed is limited to **500 nodes**, **1 MiB total**, and **64 KiB per node**.
+Its connection-check deadline also limits V2Board's cached snapshot. V2Board
+refreshes sooner when needed and stops serving an expired snapshot. See the
+[native JSON contract](v2board-json.md) for supported protocols and boundaries.
+
+`v2board.txt` remains available for compatibility. It supports VLESS, VMess,
+Trojan, Shadowsocks, Hysteria v1, and Hysteria2 within **500 entries**, **1 MiB
+total**, and **16 KiB per entry**. TUIC, AnyTLS, custom WebSocket headers, and other
+settings without a faithful share-link representation remain excluded. The
+dashboard distinguishes **V2Board JSON** and **V2Board URI** counts and notes.
 
 ## Formats and compatibility
 
@@ -173,7 +189,8 @@ Certificate-pinned Hysteria2 nodes are checked with Mihomo and retain
 Xray's Hysteria2 `tlsSettings.fingerprint` is a ClientHello setting ignored by
 its QUIC transport; it is not a certificate pin. Custom hopping intervals,
 dependency chains, binary authentication, and other settings without a share-link
-equivalent are excluded from the V2Board feed with a compatibility note.
+equivalent are excluded from the V2Board URI feed with a compatibility note.
+The JSON feed can retain these settings in accepted native configurations.
 
 ## Connection checks and publication
 
@@ -192,7 +209,8 @@ the test processes and configurations after use.
 | --- | --- |
 | Mihomo | Recent passing Mihomo check for the exact configuration and dependencies. |
 | Xray | Recent passing Xray check for the exact configuration and dependencies. |
-| Hiddify / V2Board | Compatible conversion and a recent passing check through at least one of those cores. |
+| Hiddify / V2Board URI | Compatible conversion and a recent passing check through at least one of those cores. |
+| V2Board JSON | Passing native variants only; Mihomo/Xray variants require their own core's passing check. Hiddify requires at least one compatible passing core. |
 
 Hiddify and V2Board are not tested as running client applications. Their behavior
 can differ from the Mihomo/Xray result. Native Hiddify-only configurations without

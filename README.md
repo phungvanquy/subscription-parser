@@ -61,14 +61,15 @@ subscription selection.
 
 ## Output formats
 
-Every named subscription exposes five URLs under `/sub/<token>/`:
+Every named subscription exposes six URLs under `/sub/<token>/`:
 
 | File | Intended use |
 | --- | --- |
 | `hiddify.json` | Native Hiddify/sing-box outbounds. |
 | `mihomo.yaml` | Mihomo configuration or proxy-provider feed. |
 | `xray.json` | Xray outbounds and their dependencies. |
-| `v2board.txt` | URI feed for the V2Board External Subscriptions integration. |
+| `v2board.json` | Recommended native feed for the updated V2Board External Subscriptions integration. |
+| `v2board.txt` | Legacy URI feed for older V2Board installations and share-link clients. |
 | `combined.json` | Archive of client configurations, inventory, and diagnostics. |
 
 Conversion preserves a node's protocol; it does not turn every server into VLESS.
@@ -100,6 +101,7 @@ its own providers while sharing downloads and check results with other subscript
 | [Security](docs/security.md) | Authenticator enrollment, recovery, sessions, rate limits, and credential storage. |
 | [Operations](docs/operations.md) | Updates, backups, restore, migrations, logs, and troubleshooting. |
 | [API reference](docs/api.md) | Cookie authentication, endpoints, request examples, and error handling. |
+| [V2Board JSON contract](docs/v2board-json.md) | Versioned native feed, validation, expiry, and client compatibility. |
 | [Development](docs/development.md) | Local development, tests, CI, project structure, and core upgrades. |
 
 Deployment settings and the admin key belong in `.env`. Provider credentials,

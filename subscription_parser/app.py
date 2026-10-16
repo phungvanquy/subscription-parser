@@ -338,7 +338,8 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
             if not manager.publication_current(snapshot):
                 raise HTTPException(503, 'connection checks are pending or expired; check servers in the dashboard')
             content = snapshot.get("exports", {}).get(filename)
-            target = {"hiddify.json": "hiddify", "mihomo.yaml": "mihomo", "xray.json": "xray", "v2board.txt": "v2board"}.get(filename)
+            target = {"hiddify.json": "hiddify", "mihomo.yaml": "mihomo", "xray.json": "xray",
+                      "v2board.json": "v2board", "v2board.txt": "v2board_uri"}.get(filename)
             if target and not snapshot.get("counts", {}).get(target):
                 raise HTTPException(503, "no recently passing servers available for this client; check the server library")
         if content is None:
