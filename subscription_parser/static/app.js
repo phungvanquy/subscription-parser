@@ -92,6 +92,32 @@ async function loadLogs(){
 $('refresh-logs').addEventListener('click',loadLogs);
 $('log-level').addEventListener('change',loadLogs);
 async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
+function renderProgress(){
+  $('job-progress').hidden=!state.busy;
+  if(!state.busy)return '';
+  const provider=state.providers.find(p=>p.id===state.busy_provider_id);
+  let title='Updating subscriptions',detail='Saving results and rebuilding subscription links…',percent=null;
+  if(state.busy_action==='fetching'){
+    title=`Refreshing ${provider?.name||'all providers'}`;
+    detail='Downloading and preparing server lists…';
+  }else if(state.busy_action==='checking'){
+    title=`Checking connections${provider?` · ${provider.name}`:''}`;
+    const {done=0,total=0}=state.check_progress||{};
+    detail=total?`${done} of ${total} client checks processed. A server can have checks for multiple clients.`:'Preparing saved servers for connection checks…';
+    if(total>0)percent=Math.min(100,Math.max(0,Math.floor(done/total*100)));
+  }else if(state.busy_action==='testing'){
+    title=`Testing provider fetch${provider?` · ${provider.name}`:''}`;
+    detail='Downloading a preview and checking compatible formats…';
+  }
+  if($('job-progress-title').textContent!==title)$('job-progress-title').textContent=title;
+  $('job-progress-detail').textContent=detail;
+  $('job-progress-percent').textContent=percent===null?'In progress':`${percent}%`;
+  $('job-progress-bar').classList.toggle('indeterminate',percent===null);
+  if(percent===null)$('job-progress-bar').removeAttribute('aria-valuenow');
+  else $('job-progress-bar').setAttribute('aria-valuenow',percent);
+  $('job-progress-fill').style.width=percent===null?'':`${percent}%`;
+  return `${title} · ${detail}`;
+}
 function render(){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
   const providerServers=new Map(providers.map(p=>[p.name,[]]));
@@ -100,8 +126,7 @@ function render(){
   $('stat-providers').textContent=providers.filter(p=>p.enabled).length;$('stat-provider-detail').textContent=`${providers.length} providers in your workspace`;
   $('stat-servers').textContent=state.published_total||0;$('stat-duplicate-detail').textContent=`${state.total} nodes in library · ${state.duplicates_removed||0} duplicates combined`;
   $('stat-protocols').textContent=types.length;$('stat-protocol-detail').textContent=types.map(p=>p.toUpperCase()).join(' · ')||'Original protocols preserved';
-  const checking=state.busy_action==='checking',activeProvider=providers.find(p=>p.id===state.busy_provider_id);
-  const working=checking?`Checking ${activeProvider?.name||'servers'} (${state.check_progress.done}/${state.check_progress.total})…`:state.busy_action==='updating'?'Updating subscriptions…':`Refreshing ${activeProvider?.name||'all providers'}…`;
+  const working=renderProgress();
   const downloadingAll=state.busy_action==='fetching'&&!state.busy_provider_id;
   $('stat-interval').textContent=interval(state.refresh_seconds);$('stat-next').textContent=downloadingAll?'Downloading providers…':`Next download at ${new Date(state.next_refresh*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
   $('refresh-button').disabled=state.busy;$('refresh-button').classList.toggle('spinning',downloadingAll);document.querySelector('.refresh-label').textContent=downloadingAll?'Refreshing…':'Refresh all';

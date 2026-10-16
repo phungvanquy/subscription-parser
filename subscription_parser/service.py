@@ -253,6 +253,8 @@ class Manager:
                                        if reuse_recent else 0)
                 checked = self.log_checks(previous, results, changed_only=True)
             stage = 'publish'
+            with self.guard:
+                self.busy_action = 'updating'
             max_age = config['check_seconds'] * 2
             evaluated_at = time.time()
             generated = common.now()
@@ -461,6 +463,8 @@ class Manager:
             hwid = self.store.hwid_value(provider['hwid_id']) if provider['hwid_id'] is not None else None
             fingerprint = self.request_fingerprint(provider)
             self.busy = True
+            self.busy_action = 'testing'
+            self.busy_provider_id = provider_id
         try:
             body, metadata = self.fetcher(provider['url'], hwid, provider['user_agent'], 25)
             entries = protocols.parse(body, provider['name'])
@@ -489,6 +493,8 @@ class Manager:
         finally:
             with self.guard:
                 self.busy = False
+                self.busy_action = None
+                self.busy_provider_id = None
 
     def change_hwid(self, identifier, *, name=None, replacement=None, delete=False):
         with self.guard:

@@ -14,7 +14,7 @@ import pyotp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import uvicorn
 from playwright.sync_api import sync_playwright, expect
-from subscription_parser import common, connectivity
+from subscription_parser import common, connectivity, publication
 from subscription_parser.app import create_app
 from unittest.mock import patch
 
@@ -578,19 +578,36 @@ def main():
                 page.locator('[data-close=hwid-dialog]').first.click()
                 checks.append('desktop and mobile layout, navigation and dialogs')
 
-                # Keep the check open long enough to observe its scope through
-                # real polling, without contacting any external provider/server.
+                # Hold each phase to observe real API polling and page changes,
+                # without contacting any external provider/server.
                 extra = {'name': 'Unchanged provider', 'url': 'https://unchanged.example/sub', 'hwid_id': None}
                 preview = manager.test_provider(extra)
                 extra_provider = manager.change_provider({**extra, 'test_token': preview['test_token']})
-                original_checker = manager.checker
+                original_fetcher, original_checker, original_build = manager.fetcher, manager.checker, publication.build
+                fetch_started, release_fetch = threading.Event(), threading.Event()
                 check_started, release_check = threading.Event(), threading.Event()
+                publish_started, release_publish = threading.Event(), threading.Event()
+                reports = []
+                def held_fetcher(*args, **kwargs):
+                    fetch_started.set()
+                    if not release_fetch.wait(45):
+                        raise RuntimeError('synthetic provider fetch was not released')
+                    return original_fetcher(*args, **kwargs)
                 def held_checker(*args, **kwargs):
+                    reports.append(kwargs['progress'])
                     check_started.set()
-                    if not release_check.wait(30):
+                    if not release_check.wait(45):
                         raise RuntimeError('synthetic provider check was not released')
                     return original_checker(*args, **kwargs)
+                def held_build(*args, **kwargs):
+                    publish_started.set()
+                    if not release_publish.wait(45):
+                        raise RuntimeError('synthetic publication was not released')
+                    return original_build(*args, **kwargs)
+                manager.fetcher = held_fetcher
                 manager.checker = held_checker
+                publishing = patch.object(publication, 'build', side_effect=held_build)
+                publishing.start()
                 before_fetch = len(seen)
                 schedules = (manager.next_refresh, manager.next_check)
                 try:
@@ -601,8 +618,24 @@ def main():
                     inactive = page.locator('#provider-rows tr').filter(has_text='Unchanged provider')
                     active.locator('.provider-actions summary').click()
                     active.locator('[data-action=refresh]').click()
+                    assert fetch_started.wait(5)
+                    expect(page.locator('#job-progress')).to_be_visible()
+                    expect(page.locator('#job-progress-title')).to_have_text('Refreshing Renamed provider')
+                    expect(page.locator('#job-progress-percent')).to_have_text('In progress')
+                    assert page.locator('#job-progress-bar').get_attribute('aria-valuenow') is None
+                    expect(active.locator('.provider-check-note')).to_have_text('Refreshing…')
+                    expect(inactive.locator('.provider-check-note')).to_have_count(0)
+                    release_fetch.set()
                     assert check_started.wait(5)
-                    page.evaluate('loadState()')
+                    expect(page.locator('#job-progress-title')).to_have_text('Checking connections · Renamed provider')
+                    expect(page.locator('#job-progress-detail')).to_contain_text('Preparing saved servers')
+                    assert page.locator('#job-progress-bar').get_attribute('aria-valuenow') is None
+                    reports[0](0, 6)
+                    expect(page.locator('#job-progress-bar')).to_have_attribute('aria-valuenow', '0')
+                    reports[0](2, 6)
+                    expect(page.locator('#job-progress-detail')).to_contain_text('2 of 6 client checks processed')
+                    expect(page.locator('#job-progress-percent')).to_have_text('33%')
+                    expect(page.get_by_role('progressbar', name='Checking connections · Renamed provider')).to_have_attribute('aria-valuenow', '33')
                     expect(page.locator('#last-refresh')).to_contain_text('Providers downloaded')
                     expect(page.locator('#last-connection-check')).to_contain_text('Connections checked')
                     expect(page.locator('.refresh-label')).to_have_text('Refresh all')
@@ -611,14 +644,63 @@ def main():
                     expect(inactive.locator('.provider-check-note')).to_have_count(0)
                     assert len(seen) == before_fetch + 1
                     assert seen[-1] == 'replacement-browser-hwid'
+                    for name in ('overview', 'servers', 'exports', 'activity', 'devices', 'settings', 'providers'):
+                        page.locator('.nav-item[data-page='+name+']').click()
+                        expect(page.locator('#job-progress')).to_be_visible()
+                    page.reload()
+                    expect(page.locator('#job-progress-detail')).to_contain_text('2 of 6 client checks processed')
+                    page.locator('.nav-item[data-page=providers]').click()
+                    for width in (320, 390, 768, 1440):
+                        page.set_viewport_size({'width':width, 'height':1000})
+                        expect(page.locator('#job-progress')).to_be_visible()
+                        assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                        if width in (390, 1440) and os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                            page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+f'/progress-{width}.png', full_page=True)
+                    reports[0](5, 6)
+                    expect(page.locator('#job-progress-percent')).to_have_text('83%')
+                    release_check.set()
+                    assert publish_started.wait(5)
+                    expect(page.locator('#job-progress-title')).to_have_text('Updating subscriptions')
+                    expect(page.locator('#job-progress-percent')).to_have_text('In progress')
+                    assert page.locator('#job-progress-bar').get_attribute('aria-valuenow') is None
+                finally:
+                    release_fetch.set()
+                    release_check.set()
+                    release_publish.set()
+                    manager.worker.join(10)
+                    manager.fetcher = original_fetcher
+                    manager.checker = original_checker
+                    publishing.stop()
+                assert not manager.busy
+                assert (manager.next_refresh, manager.next_check) == schedules
+                expect(page.locator('#job-progress')).not_to_be_visible()
+                expect(page.locator('#activity-rows .activity-row').first).to_contain_text('Renamed provider refreshed')
+                checks.append('live refresh/check progress follows every phase, survives navigation and reload, and fits mobile screens')
+
+                # A standalone check uses the same progress display and clears
+                # it on failure, without implying a new provider download.
+                check_started.clear(); release_check.clear(); reports.clear()
+                manager.checker = held_checker
+                try:
+                    page.locator('.nav-item[data-page=servers]').click()
+                    page.locator('#check-servers').click()
+                    assert check_started.wait(5)
+                    reports[0](3, 6)
+                    expect(page.locator('#job-progress-title')).to_have_text('Checking connections')
+                    expect(page.locator('#job-progress-bar')).to_have_attribute('aria-valuenow', '50')
+                    expect(page.locator('#connection-summary')).to_contain_text('3 of 6 client checks processed')
+                    assert len(seen) == before_fetch + 1
                 finally:
                     release_check.set()
                     manager.worker.join(10)
                     manager.checker = original_checker
-                assert not manager.busy
-                assert (manager.next_refresh, manager.next_check) == schedules
-                page.evaluate('loadState()')
-                expect(page.locator('#activity-rows .activity-row').first).to_contain_text('Renamed provider refreshed')
+                expect(page.locator('#job-progress')).not_to_be_visible()
+                with patch.object(manager, 'checker', side_effect=RuntimeError('synthetic checker failure')):
+                    page.locator('#check-servers').click()
+                    manager.worker.join(10)
+                    expect(page.locator('#global-error')).to_contain_text('refresh failed')
+                    expect(page.locator('#job-progress')).not_to_be_visible()
+                checks.append('standalone connection checks show live counts and failed work clears the progress indicator')
                 manager.change_provider(provider_id=extra_provider['id'], delete=True)
                 page.evaluate('loadState()')
                 checks.append('single-provider refresh keeps other rows idle, fetches only its saved device and preserves global schedules')

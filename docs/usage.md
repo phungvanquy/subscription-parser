@@ -231,6 +231,13 @@ checked** timestamps. Connection checks and feed rebuilds never advance the
 download timestamp. Dashboard status polling (15 seconds idle, 1.5 seconds while
 working) only reads state; it does not trigger downloads or connection checks.
 
+While work is running, a progress bar appears beneath the page heading on every
+workspace page. It shows the provider being refreshed, download/preparation and
+publication stages, and the processed client-check count and percentage once the
+check total is known. These counts are client checks, so one server can contribute
+more than one. Progress survives page navigation and browser reloads; the bar
+disappears when work finishes, and failures appear in the error notice.
+
 For each compatible configuration, an isolated Mihomo, Xray or Hiddify process sends an
 HTTPS request through the node. The request must pass TLS verification and return
 HTTP 204. The first probe is `https://www.gstatic.com/generate_204`; failures are

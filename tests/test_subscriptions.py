@@ -86,6 +86,71 @@ class SubscriptionTests(unittest.TestCase):
         checked = next(row['context'] for row in self.manager.logs.recent()['entries'] if row['event'] == 'checks_completed')
         self.assertEqual(checked['passed'], 6)
 
+    def test_live_progress_tracks_refresh_checks_publication_and_completion(self):
+        original_fetch, original_check, original_build = self.manager.fetcher, self.manager.checker, publication.build
+        for selected, download in ((None, True), (self.providers[0]['id'], True), (None, False)):
+            with self.subTest(selected=selected, download=download):
+                progress_seen, publishing_seen = [], []
+                def state_at(action):
+                    state = self.client.get('/api/state').json()
+                    self.assertTrue(state['busy'])
+                    self.assertEqual(state['busy_action'], action)
+                    self.assertEqual(state['busy_provider_id'], selected)
+                    return state
+                def fetch(*args):
+                    self.assertEqual(state_at('fetching')['check_progress'], {'done': 0, 'total': 0})
+                    return original_fetch(*args)
+                def check(*args, **kwargs):
+                    self.assertEqual(state_at('checking')['check_progress'], {'done': 0, 'total': 0})
+                    report = kwargs['progress']
+                    def progress(done, total):
+                        report(done, total)
+                        observed = state_at('checking')['check_progress']
+                        self.assertEqual(observed, {'done': done, 'total': total})
+                        progress_seen.append(observed)
+                    return original_check(*args, **{**kwargs, 'progress': progress})
+                def build(*args, **kwargs):
+                    publishing_seen.append(state_at('updating'))
+                    return original_build(*args, **kwargs)
+                with patch.object(self.manager, 'fetcher', side_effect=fetch) as downloads, \
+                        patch.object(self.manager, 'checker', side_effect=check), \
+                        patch.object(publication, 'build', side_effect=build):
+                    self.manager.refresh(selected=selected, download=download, check=True)
+                self.assertNotIn('last_error', self.manager.snapshot)
+                self.assertEqual(downloads.call_count, 0 if not download else 1 if selected else 3)
+                self.assertTrue(any(0 < p['done'] < p['total'] for p in progress_seen))
+                self.assertTrue(publishing_seen)
+                state = self.client.get('/api/state').json()
+                self.assertFalse(state['busy'])
+                self.assertIsNone(state['busy_action'])
+                self.assertIsNone(state['busy_provider_id'])
+
+    def test_fetch_preview_progress_is_scoped_and_cleared_after_success_or_failure(self):
+        original = self.manager.fetcher
+        values = self.manager.store.config()['providers'][0]
+        for provider_id in (values['id'], None):
+            for fail in (False, True):
+                with self.subTest(provider_id=provider_id, fail=fail):
+                    def fetch(*args):
+                        state = self.client.get('/api/state').json()
+                        self.assertTrue(state['busy'])
+                        self.assertEqual(state['busy_action'], 'testing')
+                        self.assertEqual(state['busy_provider_id'], provider_id)
+                        if fail:
+                            raise common.SubscriptionError('synthetic fetch failure')
+                        return original(*args)
+                    with patch.object(self.manager, 'fetcher', side_effect=fetch):
+                        preview = {**values, 'name': values['name'] if provider_id else 'New preview'}
+                        if fail:
+                            with self.assertRaises(common.SubscriptionError):
+                                self.manager.test_provider(preview, provider_id)
+                        else:
+                            self.assertIn('test_token', self.manager.test_provider(preview, provider_id))
+                    state = self.client.get('/api/state').json()
+                    self.assertFalse(state['busy'])
+                    self.assertIsNone(state['busy_action'])
+                    self.assertIsNone(state['busy_provider_id'])
+
     def test_saving_a_tested_provider_checks_only_missing_results_in_background(self):
         before = copy.deepcopy(self.manager.snapshot['connectivity'])
         next_due = self.manager.next_check_batch
