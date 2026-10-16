@@ -48,10 +48,10 @@
         </section>
 
         <section id="providers-section" class="panel page-section">
-          <div class="panel-heading"><div><h2>Subscription providers <span id="provider-total" class="count-pill">0</span></h2><p>Your sources, each with its own saved device identity.</p></div><span class="subtle-label" id="last-refresh">Not refreshed yet</span></div>
-          <div class="table-scroll"><table><thead><tr><th>PROVIDER</th><th>STATUS</th><th>SERVERS</th><th>DEVICE ID</th><th>LAST FETCH</th><th class="align-right">ACTIONS</th></tr></thead><tbody id="provider-rows"></tbody></table></div>
+          <div class="panel-heading"><div><h2>Your providers <span id="provider-total" class="count-pill">0</span></h2><p>Select a working count to view its servers.</p></div><span class="subtle-label" id="last-refresh">Not refreshed yet</span></div>
+          <div class="table-scroll"><table class="providers-table"><thead><tr><th scope="col">PROVIDER</th><th scope="col">SERVERS</th><th scope="col">DEVICE</th><th scope="col">LAST FETCH</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody id="provider-rows"></tbody></table></div>
           <div id="providers-empty" class="empty-state" hidden><span data-icon="layers"></span><h3>Start with your first provider</h3><p>Add a subscription link and choose its authorized device ID.</p><button class="button primary" id="empty-add">Add provider</button></div>
-          <div class="panel-footer"><span><i class="tiny-dot"></i> HWIDs stay fixed across refreshes</span><span id="provider-footer">HTTPS subscriptions · Credentials kept private</span></div>
+          <div class="panel-footer"><span id="provider-footer">Working counts use recent passing checks.</span></div>
         </section>
 
         <section id="subscription-overview-section" class="page-section">
@@ -87,7 +87,7 @@
         <section id="servers-section" class="panel page-section" hidden>
           <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Only recently passing nodes appear in subscription links. Failed nodes stay here for retries.</p></div><button id="check-servers" class="button secondary small"><span data-icon="network"></span>Check servers</button></div>
           <div class="notice info"><p id="connection-summary">HTTPS checks run from this server through Mihomo, Xray and Hiddify.</p></div>
-          <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board JSON</option><option value="v2board_uri">V2Board URI</option></select><select id="connection-filter" aria-label="Filter connection status"><option value="">All results</option><option value="passing">Passing</option><option value="excluded">Excluded</option></select></div>
+          <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="provider-filter" aria-label="Filter provider"><option value="">All providers</option></select><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board JSON</option><option value="v2board_uri">V2Board URI</option></select><select id="connection-filter" aria-label="Filter connection status"><option value="">All results</option><option value="passing">Passing</option><option value="excluded">Excluded</option></select></div>
           <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>MIHOMO CHECK</th><th>XRAY CHECK</th><th>HIDDIFY CHECK</th><th>PASSING FORMATS</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>HTTPS response time · Results reflect this server’s network</span></div>
         </section>
 

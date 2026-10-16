@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const paths = {
   search:'<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/>',
   more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+  chevron:'<path d="m9 5 7 7-7 7"/>',
   grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   layers:'<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/>',
   server:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6"/>',
@@ -30,7 +31,7 @@ let securityAction='setup',securityWorking=false,securityRequest=0;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
 const titles={
   overview:['YOUR WORKSPACE','Overview','Your providers, connection checks and subscriptions at a glance.','Overview'],
-  providers:['SUBSCRIPTION SOURCES','Providers','Manage source subscriptions and the devices used to fetch them.','Providers'],
+  providers:['SUBSCRIPTION SOURCES','Providers','Manage your sources and see what’s working.','Providers'],
   servers:['CONNECTION CHECKS','Server library','See which servers pass, which fail and the formats they support.','Server library'],
   exports:['YOUR SUBSCRIPTIONS','Subscriptions','Choose providers. Copy a link. Keep your clients up to date.','Subscription links'],
   activity:['WORKSPACE HISTORY','Activity & logs','Recent refreshes, connection checks and debug messages.','Activity & logs'],
@@ -47,6 +48,7 @@ function interval(value){return value===3600?'Hourly':value>=3600?`${value/3600}
 function showLogin(){clearPrivateDialogs();clearTimeout(pollTimer);logRequest++;securityRequest++;$('log-output').textContent='';$('refresh-logs').disabled=false;$('workspace').hidden=true;$('login-view').hidden=false;$('login-factor').hidden=true;$('login-code').required=false;$('login-code').value='';$('admin-key').value='';state=null;}
 function selectPage(name){
   page=name;
+  document.querySelectorAll('.provider-actions[open]').forEach(menu=>menu.open=false);
   document.querySelectorAll('.nav-item').forEach(b=>{b.classList.toggle('active',b.dataset.page===name);if(b.dataset.page===name)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
   const t=titles[name];$('page-eyebrow').textContent=t[0];$('page-title').textContent=t[1];$('page-description').textContent=t[2];$('breadcrumb-page').textContent=t[3];
   $('overview-stats').hidden=name!=='overview';
@@ -85,6 +87,8 @@ $('log-level').addEventListener('change',loadLogs);
 async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
 function render(){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
+  const providerServers=new Map(providers.map(p=>[p.name,[]]));
+  inventory.forEach(n=>n.sources.forEach(source=>providerServers.get(source)?.push(n)));
   $('nav-provider-count').textContent=providers.length;$('provider-total').textContent=providers.length;
   $('stat-providers').textContent=providers.filter(p=>p.enabled).length;$('stat-provider-detail').textContent=`${providers.length} providers in your workspace`;
   $('stat-servers').textContent=state.published_total||0;$('stat-duplicate-detail').textContent=`${state.total} nodes in library · ${state.duplicates_removed||0} duplicates combined`;
@@ -96,9 +100,10 @@ function render(){
   $('connection-summary').textContent=state.busy?working:`${state.published_total||0} of ${state.total} nodes included · ${Math.max(0,state.total-(state.published_total||0))} excluded · Last checked ${relative(state.last_check).toLowerCase()} · Recheck every ${interval(state.check_seconds).toLowerCase()}. Checks use saved subscriptions; HWIDs are not sent.`;
   $('last-refresh').textContent=state.busy?working:`Updated ${relative(state.generated_at).toLowerCase()}`;
   $('global-error').hidden=!state.last_error;if(state.last_error)$('global-error').textContent=state.last_error;
-  $('provider-rows').innerHTML=providers.map((p,i)=>`<tr><td><div class="provider-cell"><span class="provider-avatar ${['','violet','blue'][i%3]}">${esc(p.name.slice(0,1))}</span><div><span class="provider-name">${esc(p.name)}</span><span class="provider-host">${esc(p.host)}</span></div></div></td><td><span class="status-pill ${esc(p.status)}" title="${esc(p.error||'')}">${esc({fresh:'Up to date',cached:'Cached',unavailable:'Unavailable',disabled:'Paused',pending:'Pending'}[p.status]||p.status)}</span>${p.error?`<span class="provider-host" title="${esc(p.error)}">${esc(p.error.slice(0,45))}${p.error.length>45?'…':''}</span>`:''}</td><td><span class="server-count">${p.count||0}</span></td><td><span class="device-label" title="${esc(p.hwid_id)}">${esc(p.hwid_id===null?'No device ID':state.hwids.find(h=>h.id===p.hwid_id)?.name||'Missing device')}</span></td><td>${relative(p.fetched_at)}</td><td><div class="row-actions"><button class="icon-button" data-action="refresh" data-id="${esc(p.id)}" title="Refresh provider" aria-label="Refresh ${esc(p.name)}" ${state.busy||!p.enabled?'disabled':''}>${icon('refresh')}</button><button class="icon-button" data-action="toggle" data-id="${esc(p.id)}" title="${p.enabled?'Pause':'Enable'} provider" aria-label="${p.enabled?'Pause':'Enable'} ${esc(p.name)}" ${state.busy?'disabled':''}>${icon(p.enabled?'pause':'play')}</button><button class="icon-button" data-action="edit" data-id="${esc(p.id)}" title="Edit provider" aria-label="Edit ${esc(p.name)}">${icon('edit')}</button><button class="icon-button danger" data-action="delete" data-id="${esc(p.id)}" title="Remove provider" aria-label="Remove ${esc(p.name)}" ${state.busy?'disabled':''}>${icon('trash')}</button></div></td></tr>`).join('');
+  renderProviders(providerServers);
   $('providers-empty').hidden=providers.length>0;
   renderSubscriptions();
+  const selectedProvider=$('provider-filter').value;$('provider-filter').innerHTML='<option value="">All providers</option>'+providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');if(providers.some(p=>p.id===selectedProvider))$('provider-filter').value=selectedProvider;
   const selected=$('protocol-filter').value;$('protocol-filter').innerHTML='<option value="">All protocols</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t.toUpperCase())}</option>`).join('');if(types.includes(selected))$('protocol-filter').value=selected;
   renderServers();renderIssues();
   $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${event.action==='refresh'?'Subscriptions refreshed':event.action==='connection check'?'Connections checked':'Subscription configuration updated'}</strong><p>${event.published??event.servers} included / ${event.servers} nodes · ${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
@@ -107,6 +112,53 @@ function render(){
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
   $('footer-time').textContent=state.generated_at?`Last updated ${date(state.generated_at)}`:'';
 }
+function renderProviders(providerServers){
+  const rows=$('provider-rows'),expanded=new Set([...rows.querySelectorAll('details[open]')].map(el=>el.id));
+  const focused=rows.contains(document.activeElement)?document.activeElement.id:null;
+  setHTML('provider-rows',state.providers.map((p,i)=>{
+    const device=p.hwid_id===null?'No device ID':state.hwids.find(h=>h.id===p.hwid_id)?.name||'Missing device';
+    const status={fresh:'Up to date',cached:'Cached',unavailable:'Unavailable',disabled:'Paused',pending:'Pending'}[p.status]||p.status;
+    const menuId=`provider-menu-${p.id}`;
+    return `<tr data-provider="${esc(p.id)}">
+      <td class="provider-identity"><div class="provider-cell"><span class="provider-avatar ${['','violet','blue'][i%3]}">${esc(p.name.slice(0,1))}</span><div class="provider-identity-copy"><span class="provider-name" title="${esc(p.name)}">${esc(p.name)}</span><span class="provider-host" title="${esc(p.host)}">${esc(p.host)}</span></div></div></td>
+      <td class="provider-servers">${providerServerCell(p,providerServers.get(p.name),expanded)}</td>
+      <td class="provider-device"><span class="provider-meta-label">Device</span><span class="device-label" title="${esc(device)}">${esc(device)}</span></td>
+      <td class="provider-fetch"><span class="provider-meta-label">Last fetch</span><span class="status-pill ${esc(p.status)}" title="${esc(p.error||'')}">${esc(status)}</span><span class="provider-fetch-time" title="${esc(date(p.fetched_at))}">${relative(p.fetched_at)}</span>${p.error?`<span class="provider-fetch-error" title="${esc(p.error)}">${esc(p.error)}</span>`:''}</td>
+      <td class="provider-actions-cell"><details id="${esc(menuId)}" class="action-menu provider-actions" ${expanded.has(menuId)?'open':''}><summary id="provider-actions-${esc(p.id)}" aria-label="Actions for ${esc(p.name)}" title="Provider actions">${icon('more')}</summary><div class="action-menu-items">
+        <button id="provider-refresh-${esc(p.id)}" data-action="refresh" data-id="${esc(p.id)}" ${state.busy||!p.enabled?'disabled':''}>${icon('refresh')}Refresh provider</button>
+        <button id="provider-edit-${esc(p.id)}" data-action="edit" data-id="${esc(p.id)}">${icon('edit')}Edit provider</button>
+        <button id="provider-toggle-${esc(p.id)}" data-action="toggle" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon(p.enabled?'pause':'play')}${p.enabled?'Pause':'Enable'} provider</button>
+        <button id="provider-delete-${esc(p.id)}" class="danger-text" data-action="delete" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon('trash')}Remove provider</button>
+      </div></details></td>
+    </tr>`;
+  }).join(''));
+  if(focused)$(focused)?.focus({preventScroll:true});
+}
+function providerServerCell(provider,servers,expanded){
+  const working=servers.filter(n=>n.clients.length>0).length;
+  const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];
+  const statuses=servers.flatMap(n=>Object.values(n.connectivity||{}).map(value=>value.status));
+  const note=!provider.enabled?'Paused':state.busy_action==='checking'?'Checking…':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
+  const detailsId=`provider-clients-${provider.id}`;
+  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${provider.count||0}</span> total</span></div>
+    ${note?`<small class="provider-check-note">${note}</small>`:''}
+    <details id="${esc(detailsId)}" class="provider-client-details" ${expanded.has(detailsId)?'open':''}><summary id="provider-breakdown-${esc(provider.id)}">By client ${icon('chevron')}</summary><div class="provider-client-counts" role="group" aria-label="Working servers by client">${clients.map(([client,label])=>`<span>${label}<strong>${servers.filter(n=>n.clients.includes(client)).length}</strong></span>`).join('')}</div></details>`;
+}
+$('provider-rows').addEventListener('click',event=>{
+  const button=event.target.closest('[data-provider-servers]');if(!button)return;
+  $('provider-filter').value=button.dataset.providerServers;
+  $('server-search').value='';$('protocol-filter').value='';$('client-filter').value='';$('connection-filter').value='passing';
+  selectPage('servers');renderServers();$('provider-filter').focus();
+});
+document.addEventListener('click',event=>{
+  document.querySelectorAll('.provider-actions[open]').forEach(menu=>{if(!menu.contains(event.target))menu.open=false;});
+});
+document.addEventListener('keydown',event=>{
+  if(event.key==='Escape')document.querySelectorAll('.provider-actions[open]').forEach(menu=>{menu.open=false;menu.querySelector('summary').focus();});
+});
+$('provider-rows').addEventListener('focusout',event=>{
+  const menu=event.target.closest('.provider-actions');if(menu&&!menu.contains(event.relatedTarget))menu.open=false;
+});
 function currentSubscription(){return state?.subscriptions.find(s=>s.id===selectedSubscription);}
 function subscriptionProviders(subscription){return state.providers.filter(p=>subscription.all_providers||subscription.provider_ids.includes(p.id));}
 function subscriptionStatus(subscription){
@@ -223,13 +275,15 @@ function connectionCell(value){
 function renderServers(){
   if(!state)return;
   const text=$('server-search').value.toLowerCase(),protocol=$('protocol-filter').value,client=$('client-filter').value,connection=$('connection-filter').value;
-  const rows=state.inventory.filter(n=>(!text||`${n.name} ${n.sources.join(' ')}`.toLowerCase().includes(text))&&(!protocol||n.protocol===protocol)&&(!client||n.clients.includes(client))&&(!connection||(connection==='passing'?n.clients.length>0:n.clients.length===0)));
+  const provider=state.providers.find(p=>p.id===$('provider-filter').value);
+  const rows=state.inventory.filter(n=>(!provider||n.sources.includes(provider.name))&&(!text||`${n.name} ${n.sources.join(' ')}`.toLowerCase().includes(text))&&(!protocol||n.protocol===protocol)&&(!client||n.clients.includes(client))&&(!connection||(connection==='passing'?n.clients.length>0:n.clients.length===0)));
   $('server-total').textContent=state.total;
   $('server-rows').innerHTML=rows.slice(0,1000).map(n=>`<tr><td class="provider-name">${esc(n.name)}</td><td><span class="protocol-chip">${esc(n.protocol)}</span></td><td>${esc(n.sources.join(', '))}</td><td>${connectionCell(n.connectivity?.mihomo)}</td><td>${connectionCell(n.connectivity?.xray)}</td><td>${connectionCell(n.connectivity?.hiddify)}</td><td>${n.clients.map(c=>`<span class="client-badge">${esc(c==='hiddify'?'Hiddify':c==='mihomo'?'Mihomo':c==='v2board'?'V2Board JSON':c==='v2board_uri'?'V2Board URI':'Xray')}</span>`).join('')||'<span class="status-pill pending">Excluded</span>'}</td></tr>`).join('')||'<tr><td colspan="7" class="empty-small">No servers match these filters.</td></tr>';
   $('server-shown').textContent=`Showing ${Math.min(rows.length,1000)} of ${state.total} servers`;
 }
 function renderIssues(){if(!state)return;const client=$('issue-client').value,issues=state.diagnostics.filter(i=>!client||i.client===client);$('issue-total').textContent=issues.length;$('issue-rows').innerHTML=issues.slice(0,150).map(i=>`<div class="issue-row"><span class="issue-dot">!</span><div><strong>${esc(i.name)} <span class="provider-host">${esc(i.source)}</span></strong><p>${esc(i.reason)}</p></div><span class="issue-client">${esc(i.client)}</span></div>`).join('')||'<div class="empty-small">No compatibility exceptions for this selection.</div>';if(issues.length>150)$('issue-rows').insertAdjacentHTML('beforeend',`<div class="empty-small">Showing 150 of ${issues.length} notes. Download the combined archive for the full report.</div>`);}
 $('server-search').addEventListener('input',renderServers);$('protocol-filter').addEventListener('change',renderServers);$('client-filter').addEventListener('change',renderServers);$('issue-client').addEventListener('change',renderIssues);
+$('provider-filter').addEventListener('change',renderServers);
 async function refresh(id){try{await api('/refresh'+(id?'?provider_id='+encodeURIComponent(id):''),{method:'POST'});toast('Refreshing subscriptions…');await loadState();}catch(error){toast(error.message);}}
 $('refresh-button').addEventListener('click',()=>refresh());
 $('connection-filter').addEventListener('change',renderServers);
@@ -332,7 +386,22 @@ $('provider-form').addEventListener('submit',async event=>{
   }catch(error){$('provider-error').textContent=(savedRuns.size?`${savedRuns.size} subscription(s) already saved. `:'')+error.message;await loadState();}
   finally{providerBusy(false);}
 });
-$('provider-rows').addEventListener('click',async event=>{const button=event.target.closest('[data-action]');if(!button)return;const provider=state.providers.find(p=>p.id===button.dataset.id);if(!provider)return;try{if(button.dataset.action==='edit')openProvider(provider);if(button.dataset.action==='refresh')await refresh(provider.id);if(button.dataset.action==='toggle'){await api('/providers/'+provider.id,{method:'PUT',body:JSON.stringify({...provider,url:'',enabled:!provider.enabled})});toast(provider.enabled?'Provider paused':'Provider enabled');await loadState();if(!provider.enabled)await refresh(provider.id);}if(button.dataset.action==='delete'&&confirm(`Remove “${provider.name}” and its servers from the combined subscriptions?`)){await api('/providers/'+provider.id,{method:'DELETE'});toast('Provider removed');await loadState();}}catch(error){toast(error.message);}});
+$('provider-rows').addEventListener('click',async event=>{
+  const button=event.target.closest('[data-action]');if(!button)return;
+  const provider=state.providers.find(p=>p.id===button.dataset.id);if(!provider)return;
+  const menu=button.closest('.provider-actions');menu.open=false;menu.querySelector('summary').focus();
+  try{
+    if(button.dataset.action==='edit')openProvider(provider);
+    if(button.dataset.action==='refresh')await refresh(provider.id);
+    if(button.dataset.action==='toggle'){
+      await api('/providers/'+provider.id,{method:'PUT',body:JSON.stringify({...provider,url:'',enabled:!provider.enabled})});
+      toast(provider.enabled?'Provider paused':'Provider enabled');await loadState();if(!provider.enabled)await refresh(provider.id);
+    }
+    if(button.dataset.action==='delete'&&confirm(`Remove “${provider.name}” and its servers from the combined subscriptions?`)){
+      await api('/providers/'+provider.id,{method:'DELETE'});toast('Provider removed');await loadState();
+    }
+  }catch(error){toast(error.message);}
+});
 function renderDevices(){
   $('device-total').textContent=state.hwids.length;
   $('hwid-rows').innerHTML=state.hwids.map(h=>`<article class="device-card" data-device="${esc(h.id)}"><div class="device-heading">${icon('shield')}<strong>${esc(h.name)}</strong><code>${esc(h.masked_value)}</code><span class="status-pill ${h.configured?'':'unavailable'}">${h.configured?'Saved':'Missing ID'}</span></div><p>${h.providers.length?`Used by ${h.providers.length} subscription(s)`:'Not assigned to any subscriptions'}</p>${h.providers.length?`<ul class="device-usage">${h.providers.map(p=>`<li>${esc(p.name)}${p.enabled?'':' · Paused'}</li>`).join('')}</ul>`:''}<div class="device-actions"><button class="button secondary" data-device-action="rename" ${state.busy?'disabled':''}>Rename</button><button class="button secondary" data-device-action="reveal" ${h.configured?'':'disabled'}>Reveal ID</button><button class="button secondary" data-device-action="copy" ${h.configured?'':'disabled'}>Copy ID</button><button class="button secondary" data-device-action="replace" ${state.busy?'disabled':''}>Replace ID</button><button class="button secondary" data-device-action="delete" ${h.providers.length||state.busy?'disabled':''} title="${h.providers.length?'Reassign subscriptions before deleting this device':'Delete unused device'}">Delete</button></div></article>`).join('')||'<div class="empty-small">Add a device ID already authorized for your subscription, or choose “No device ID” when adding a provider that does not require one.</div>';

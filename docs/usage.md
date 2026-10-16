@@ -24,6 +24,14 @@ Changing a provider's URL, device assignment, or user agent in the dashboard
 requires another fetch test. A name-only edit does not. Fetch tests validate
 retrieval and conversion; the separate connection checks test remote servers.
 
+The **Providers** page shows working servers alongside each provider's total.
+Expand **By client** for the compatible format counts; the **⋯** menu contains
+refresh, edit, pause/enable, and remove actions. Working means included in at least
+one format with current passing connection checks; pending, failed, and expired
+checks do not count. A shared server counts once for each provider that supplies it.
+Select the working count to open **Server library**, filtered to that provider's
+passing servers. Use **All providers** and **All results** to clear those filters.
+
 ### Refresh and cache behavior
 
 Provider refreshes run hourly by default. Change the interval in
