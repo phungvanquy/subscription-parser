@@ -124,8 +124,12 @@ def main():
         assert not api('/api/login', 'POST', {'token': admin})['authenticated']
         checks.append('authenticator enrollment requires a valid code and then enforces the second factor')
         log_entry = api('/api/logs')['entries'][0]
+        before_restart = api('/api/state')
         compose('up', '-d', '--no-build', '--force-recreate', '--wait', '--wait-timeout', '60')
         state = wait_for_refresh()
+        for field in ('next_check', 'last_download', 'last_check'):
+            assert state[field] == before_restart[field], (field, 'changed on restart')
+        checks.append('container replacement preserves the check schedule and does not trigger another batch')
         assert api('/api/security')['enabled']
         assert api('/api/security')['recovery_codes_remaining'] == 10
         assert state['links']['v2board.txt'] == new

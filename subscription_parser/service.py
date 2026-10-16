@@ -270,7 +270,10 @@ class Manager:
             if check and selected is None:
                 next_check = connectivity.next_check_at(results, config['check_seconds'], batch_due=next_batch)
             elif check:
-                next_check = connectivity.next_check_at(results, config['check_seconds'], batch_due=next_check)
+                # Resume unfinished selected work sooner, without postponing an
+                # already-due global check while this provider was refreshing.
+                next_check = min(next_check, connectivity.next_check_at(results,
+                    config['check_seconds'], batch_due=next_check))
             elif not check and pending:
                 next_check = min(next_check, time.time() + 5)
             event = {"at": generated, "seconds": round(time.monotonic() - started, 2), "servers": combined["total"],

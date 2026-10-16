@@ -271,6 +271,15 @@ class SubscriptionTests(unittest.TestCase):
         self.assertEqual(self.fetches, [])
         self.assertEqual(self.manager.next_check, batch_due)
 
+    def test_provider_refresh_does_not_postpone_already_due_background_work(self):
+        deadline = time.time() - 30
+        self.manager.next_check = deadline
+        batch_due = self.manager.next_check_batch
+        self.manager.refresh(selected=self.providers[0]['id'])
+        self.assertNotIn('last_error', self.manager.snapshot)
+        self.assertEqual(self.manager.next_check, deadline)
+        self.assertEqual(self.manager.next_check_batch, batch_due)
+
     def test_failed_batch_retries_without_advancing_regular_schedule(self):
         now = time.time()
         self.manager.next_check_batch = now
