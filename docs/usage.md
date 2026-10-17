@@ -25,8 +25,11 @@ Changing a provider's URL, device assignment, or user agent in the dashboard
 requires another fetch test. Name-only and server-limit edits do not. Fetch tests validate
 retrieval and conversion; the separate connection checks test remote servers.
 
-The **Providers** page shows working servers alongside each provider's total.
-Expand **By client** for the compatible format counts; the **⋯** menu contains
+The **Providers** page shows compact rows with working servers, connection status,
+and the last fetch. Search by provider name, host, or device, filter by status,
+and use the page controls to show 25, 50, or 100 providers at a time.
+Expand the arrow beside a provider for sampling details, device, fetch errors,
+and compatible format counts; the **⋯** menu contains
 refresh, edit, pause/enable, and remove actions. Working means included in at least
 one format with current passing connection checks; pending, failed, and expired
 checks do not count. A shared server counts once for each provider that supplies it.
@@ -56,7 +59,8 @@ list. A server can be selected again in a later draw. Editing the limit applies
 to the cached list immediately without downloading again; newly selected servers
 need current passing checks before publication.
 
-Provider rows show the selected count, full fetched count, and configured limit.
+Provider rows show the selected count. Expand a row for the full fetched count
+and configured limit.
 The saved response retains the full list, so increasing or clearing the limit
 does not require another fetch.
 

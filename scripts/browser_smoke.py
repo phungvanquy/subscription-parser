@@ -30,6 +30,150 @@ def read_clipboard(page):
     return page.evaluate('window.__testClipboardWrite')
 
 
+def provider_details(row):
+    return row.locator('xpath=following-sibling::tr[1]')
+
+
+def check_large_provider_list(page, checks):
+    """Exercise pagination and live updates with 200 synthetic sources."""
+    fixture = page.evaluate('state')
+    source, node = fixture['providers'][0], fixture['inventory'][0]
+    fixture.update(providers=[], inventory=[], busy=False, refresh_running=False,
+                   check_running=False, check_queued=False, last_error=None,
+                   revision='synthetic-provider-list')
+    for index in range(1, 201):
+        kind = index % 4
+        provider = {**source, 'id': f'large-{index}', 'name': f'Provider {index:03}',
+                    'host': f'provider-{index}.example', 'enabled': kind != 0,
+                    'status': ('disabled', 'fresh', 'cached', 'unavailable')[kind],
+                    'count': 20, 'fetched_count': 200, 'server_limit': 20,
+                    'selection_pending': index == 1,
+                    'error': 'Provider returned HTTP 429. ' + 'Retry later. ' * 30 if kind == 2 else None}
+        if index == 1:
+            provider['name'] += ' · A very long provider name with more detail than the row can display'
+            provider['host'] = 'long-host-' * 25 + '.example'
+        fixture['providers'].append(provider)
+        if kind:
+            for server in range(20):
+                clients = node['clients'] if kind in (1, 2) and server < 15 else []
+                fixture['inventory'].append({**node, 'id': f'large-node-{index}-{server}',
+                    'name': f'Server {index}-{server}', 'sources': [provider['name']], 'clients': clients,
+                    'connectivity': {core: {'status': 'passed' if clients else 'failed', 'latency_ms': 12}
+                                     for core in ('hiddify', 'mihomo', 'xray')}})
+    fixture['total'] = len(fixture['inventory'])
+    fixture['published_total'] = sum(bool(n['clients']) for n in fixture['inventory'])
+    def state_response(route):
+        route.fulfill(json=fixture)
+    page.route('**/api/state*', state_response)
+    try:
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.evaluate('loadState()')
+        page.locator('.nav-item[data-page=providers]').click()
+        rows = page.locator('#provider-rows .provider-row')
+        expect(rows).to_have_count(25)
+        expect(page.locator('#provider-footer')).to_have_text('1–25 of 200 providers')
+        expect(page.locator('#provider-previous')).to_be_disabled()
+        assert max(rows.evaluate_all('rows => rows.map(row => row.getBoundingClientRect().height)')) <= 64
+        first = rows.first
+        first.locator('.provider-expand').focus()
+        page.keyboard.press('Enter')
+        expect(provider_details(first)).to_be_visible()
+        expect(provider_details(first)).to_contain_text('200 fetched · 20 selected · random limit 20')
+        expect(provider_details(first)).to_contain_text('previous selection stays active')
+        page.evaluate('loadState(true)')
+        expect(first.locator('.provider-expand')).to_be_focused()
+        expect(first.locator('.provider-expand')).to_have_attribute('aria-expanded', 'true')
+        first.locator('.provider-expand').click()
+        if os.environ.get('PARSER_TEST_SCREENSHOTS'):
+            page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-200-desktop.png')
+        page.locator('#provider-next').click()
+        expect(page.locator('#provider-footer')).to_have_text('26–50 of 200 providers')
+        expect(rows.first).to_contain_text('Provider 026')
+        rows.first.locator('.provider-actions summary').click()
+        page.evaluate('loadState(true)')
+        expect(rows.first.locator('[data-action=edit]')).to_be_visible()
+        expect(rows.first.locator('[data-action=edit]')).to_have_attribute('data-id', 'large-26')
+        expect(page.locator('#provider-page-label')).to_have_text('2 / 8')
+        page.keyboard.press('Escape')
+        page.locator('#provider-search').fill('pRoViDeR 199')
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('Provider 199')
+        expect(page.locator('#provider-page-label')).to_have_text('1 / 1')
+        page.locator('#provider-search').fill('provider-198.example')
+        expect(rows).to_have_count(1)
+        rows.first.locator('.provider-working').click()
+        expect(page.locator('#provider-filter')).to_have_value('large-198')
+        expect(page.locator('#connection-filter')).to_have_value('passing')
+        expect(page.locator('#server-rows tr')).to_have_count(15)
+        page.locator('.nav-item[data-page=providers]').click()
+        expect(page.locator('#provider-search')).to_have_value('provider-198.example')
+        page.locator('#provider-search').fill('does-not-exist')
+        expect(page.locator('#providers-no-results')).to_be_visible()
+        expect(page.locator('#providers-empty')).not_to_be_visible()
+        page.locator('#clear-provider-filters').click()
+        expect(page.locator('#provider-search')).to_be_focused()
+        expect(rows).to_have_count(25)
+        checks.append('200-provider search, page navigation, empty search, working-server drill-down and polling preserve controls')
+
+        for status, total in (('enabled', 150), ('passing', 100), ('attention', 100), ('paused', 50)):
+            page.locator('#provider-status-filter').select_option(status)
+            expect(page.locator('#provider-footer')).to_have_text(f'1–25 of {total} providers · 200 total')
+        expect(rows.first.locator('.provider-check-note')).to_have_text('Paused')
+        page.locator('#provider-status-filter').select_option('')
+        page.locator('#provider-page-size').select_option('50')
+        expect(rows).to_have_count(50)
+        for _ in range(3):
+            page.locator('#provider-next').click()
+        expect(page.locator('#provider-footer')).to_have_text('151–200 of 200 providers')
+        expect(page.locator('#provider-next')).to_be_disabled()
+        saved_providers = fixture['providers']
+        fixture['providers'] = saved_providers[:49]
+        page.evaluate('loadState()')
+        expect(page.locator('#provider-footer')).to_have_text('1–49 of 49 providers')
+        expect(page.locator('#provider-page-label')).to_have_text('1 / 1')
+        fixture['providers'] = saved_providers
+        page.evaluate('loadState()')
+        page.locator('#provider-page-size').select_option('100')
+        expect(rows).to_have_count(100)
+        page.locator('#provider-page-size').select_option('25')
+        checks.append('provider status filters, configurable page size and page clamping after live removal')
+
+        for width in (320, 390, 768, 1000, 1440):
+            page.set_viewport_size({'width': width, 'height': 1000})
+            assert page.evaluate('document.body.scrollWidth <= innerWidth')
+            assert page.locator('#provider-table-wrap').evaluate('el => el.scrollWidth <= el.clientWidth')
+            heights = rows.evaluate_all('rows => rows.map(row => row.getBoundingClientRect().height)')
+            assert max(heights) <= (104 if width <= 760 else 68), (width, heights)
+            first.locator('.provider-expand').click()
+            expect(provider_details(first)).to_be_visible()
+            assert page.evaluate('document.body.scrollWidth <= innerWidth')
+            first.locator('.provider-expand').click()
+            rows.nth(1).locator('.provider-expand').click()
+            expect(provider_details(rows.nth(1)).locator('.provider-fetch-error')).to_be_visible()
+            assert page.evaluate('document.body.scrollWidth <= innerWidth')
+            rows.nth(1).locator('.provider-expand').click()
+            first.locator('.provider-actions summary').click()
+            expect(first.locator('[data-action=edit]')).to_be_in_viewport()
+            assert page.evaluate('document.body.scrollWidth <= innerWidth')
+            page.keyboard.press('Escape')
+            if width == 390 and os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                page.locator('#providers-section').scroll_into_view_if_needed()
+                page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-200-mobile.png')
+        fixture['providers'], fixture['inventory'] = [], []
+        page.evaluate('loadState()')
+        expect(page.locator('#providers-empty')).to_be_visible()
+        expect(page.locator('#provider-toolbar')).not_to_be_visible()
+        expect(page.locator('#provider-list-footer')).not_to_be_visible()
+        checks.append('compact provider row heights, long names/errors, expandable details and menus fit desktop, tablet and mobile')
+    finally:
+        page.unroute('**/api/state*', state_response)
+        page.evaluate("""async () => {
+            $('provider-search').value='';$('provider-status-filter').value='';$('provider-page-size').value='25';
+            providerPage=0;expandedProviders.clear();await loadState();
+        }""")
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+
+
 @contextmanager
 def checked_browser(checks):
     engine = os.environ.get('PARSER_TEST_ENGINE', 'chromium')
@@ -162,11 +306,11 @@ def main():
                 page.locator('#save-provider').click()
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 page.locator('.nav-item[data-page=overview]').click()
-                expect(page.locator('#provider-rows tr')).to_have_count(2)
+                expect(page.locator('#provider-rows .provider-row')).to_have_count(2)
                 expect(page.locator('#last-refresh')).to_contain_text('Providers downloaded')
                 download_time = manager.snapshot['last_download']
                 download_label = page.locator('#last-refresh').get_attribute('title')
-                for row in page.locator('#provider-rows tr').all():
+                for row in page.locator('#provider-rows .provider-row').all():
                     expect(row.locator('.server-count')).to_have_text('2')
                     expect(row.locator('.provider-working')).to_have_text('0 working')
                     expect(row.locator('.provider-check-note')).to_have_text('Awaiting checks')
@@ -193,17 +337,17 @@ def main():
                 assert seen==['saved-browser-hwid','second-browser-hwid']
                 checks.append('explicit per-link devices, test-before-save and reuse of tested responses')
 
-                for row in page.locator('#provider-rows tr').all():
+                for row in page.locator('#provider-rows .provider-row').all():
                     expect(row.locator('.provider-working')).to_have_text('2 working')
-                    expect(row.locator('.provider-client-counts strong')).to_have_text(['2'] * 5)
-                    expect(row.locator('.provider-client-counts')).not_to_be_visible()
-                first_row = page.locator('#provider-rows tr').first
-                first_row.locator('.provider-client-details summary').focus()
+                    expect(provider_details(row).locator('.provider-client-counts strong')).to_have_text(['2'] * 5)
+                    expect(provider_details(row).locator('.provider-client-counts')).not_to_be_visible()
+                first_row = page.locator('#provider-rows .provider-row').first
+                first_row.locator('.provider-expand').focus()
                 page.keyboard.press('Enter')
-                expect(first_row.locator('.provider-client-counts')).to_be_visible()
+                expect(provider_details(first_row).locator('.provider-client-counts')).to_be_visible()
                 page.evaluate('loadState()')
-                expect(first_row.locator('.provider-client-counts')).to_be_visible()
-                expect(first_row.locator('.provider-client-details summary')).to_be_focused()
+                expect(provider_details(first_row).locator('.provider-client-counts')).to_be_visible()
+                expect(first_row.locator('.provider-expand')).to_be_focused()
                 first_row.locator('.provider-actions summary').focus()
                 page.keyboard.press('Enter')
                 page.keyboard.press('Tab')
@@ -223,16 +367,16 @@ def main():
                         result['checked_ts'] = time.time() - 1201
                 manager.snapshot['valid_until'] = time.time() - 1
                 page.reload()
-                expect(page.locator('#provider-rows tr')).to_have_count(2)
-                for row in page.locator('#provider-rows tr').all():
+                expect(page.locator('#provider-rows .provider-row')).to_have_count(2)
+                for row in page.locator('#provider-rows .provider-row').all():
                     expect(row.locator('.provider-working')).to_have_text('0 working')
                     expect(row.locator('.server-count')).to_have_text('2')
-                    expect(row.locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
+                    expect(provider_details(row).locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
                     expect(row.locator('.provider-check-note')).to_have_text('Checks expired')
                 manager.snapshot['connectivity'] = saved_connectivity
                 manager.refresh(download=False, check=False)
                 page.reload()
-                expect(page.locator('#provider-rows tr').first.locator('.provider-working')).to_have_text('2 working')
+                expect(page.locator('#provider-rows .provider-row').first.locator('.provider-working')).to_have_text('2 working')
                 page.locator('.nav-item[data-page=providers]').click()
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-desktop.png',full_page=True)
@@ -241,16 +385,16 @@ def main():
                 assert page.locator('#providers-section .table-scroll').evaluate('el => el.scrollWidth <= el.clientWidth')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-mobile.png',full_page=True)
-                first_row.locator('.provider-client-details summary').click()
-                expect(first_row.locator('.provider-client-counts')).to_be_visible()
+                first_row.locator('.provider-expand').click()
+                expect(provider_details(first_row).locator('.provider-client-counts')).to_be_visible()
                 first_row.locator('.provider-actions summary').click()
                 expect(first_row.locator('[data-action=edit]')).to_be_in_viewport()
                 assert page.evaluate('document.body.scrollWidth <= innerWidth')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
                     page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+'/providers-expanded-mobile.png',full_page=True)
                 page.keyboard.press('Escape')
-                first_row.locator('.provider-client-details summary').click()
-                page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.provider-working').click()
+                first_row.locator('.provider-expand').click()
+                page.locator('#provider-rows .provider-row').filter(has_text='Demo 2').locator('.provider-working').click()
                 expect(page.locator('#page-title')).to_have_text('Server library')
                 expect(page.locator('#provider-filter option:checked')).to_have_text('Demo 2')
                 expect(page.locator('#connection-filter')).to_have_value('passing')
@@ -260,9 +404,9 @@ def main():
                 page.locator('#check-servers').click()
                 expect(page.locator('#check-servers')).to_be_enabled(timeout=15000)
                 page.locator('.nav-item[data-page=providers]').click()
-                for row in page.locator('#provider-rows tr').all():
+                for row in page.locator('#provider-rows .provider-row').all():
                     expect(row.locator('.provider-working')).to_have_text('2 working')
-                    expect(row.locator('.provider-client-counts strong')).to_have_text(['2', '2', '1', '2', '2'])
+                    expect(provider_details(row).locator('.provider-client-counts strong')).to_have_text(['2', '2', '1', '2', '2'])
                 failed_checks.clear()
                 page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#provider-filter').select_option('')
@@ -320,12 +464,12 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 assert seen[-1] is None and len(seen)==3
                 page.locator('.nav-item[data-page=providers]').click()
-                no_device=page.locator('#provider-rows tr').filter(has_text='No device provider')
-                expect(no_device).to_contain_text('No device ID')
+                no_device=page.locator('#provider-rows .provider-row').filter(has_text='No device provider')
+                expect(provider_details(no_device)).to_contain_text('No device ID')
                 no_device.locator('.provider-actions summary').click()
                 page.once('dialog',lambda dialog:dialog.accept())
                 no_device.locator('[data-action=delete]').click()
-                expect(page.locator('#provider-rows tr')).to_have_count(2)
+                expect(page.locator('#provider-rows .provider-row')).to_have_count(2)
                 checks.append('explicit no-device subscription and removal')
 
                 page.locator('.nav-item[data-page=servers]').click()
@@ -348,8 +492,8 @@ def main():
                 expect(page.locator('#server-rows')).to_contain_text('Failed')
                 expect(page.locator('#connection-summary')).to_contain_text('1 excluded')
                 page.locator('.nav-item[data-page=providers]').click()
-                expect(page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.provider-working')).to_have_text('1 working')
-                expect(page.locator('#provider-rows tr').filter(has_text='Demo 2').locator('.server-count')).to_have_text('2')
+                expect(page.locator('#provider-rows .provider-row').filter(has_text='Demo 2').locator('.provider-working')).to_have_text('1 working')
+                expect(page.locator('#provider-rows .provider-row').filter(has_text='Demo 2').locator('.server-count')).to_have_text('2')
                 page.locator('.nav-item[data-page=servers]').click()
                 page.locator('#connection-filter').select_option('')
                 if os.environ.get('PARSER_TEST_SCREENSHOTS'):
@@ -396,7 +540,7 @@ def main():
                 # cache. Refresh the synthetic providers before scoping feeds.
                 page.locator('.nav-item[data-page=providers]').click()
                 page.locator('#refresh-button').click()
-                expect(page.locator('#provider-rows tr').first.locator('.server-count')).to_have_text('2', timeout=15000)
+                expect(page.locator('#provider-rows .provider-row').first.locator('.server-count')).to_have_text('2', timeout=15000)
                 page.locator('.nav-item[data-page=exports]').click()
                 expect(page.locator('#add-subscription')).to_be_enabled(timeout=15000)
                 subscription_fetches = len(seen)
@@ -502,7 +646,7 @@ def main():
                 checks.append('mobile list and detail navigation, keyboard selection and searchable provider choices')
 
                 page.locator('.nav-item[data-page=providers]').click()
-                limited_row = page.locator('#provider-rows tr').filter(has_text='Demo 2')
+                limited_row = page.locator('#provider-rows .provider-row').filter(has_text='Demo 2')
                 before_limit_fetches = len(seen)
                 limited_row.locator('.provider-actions summary').click()
                 limited_row.locator('[data-action=edit]').click()
@@ -515,7 +659,7 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 expect(limited_row.locator('.server-count')).to_have_text('1')
                 expect(limited_row.locator('.provider-working')).to_have_text('1 working')
-                expect(limited_row.locator('.provider-sample-note')).to_have_text('2 fetched · random limit 1')
+                expect(provider_details(limited_row).locator('.provider-sample-note')).to_have_text('2 fetched · 1 selected · random limit 1')
                 assert len(seen) == before_limit_fetches
                 page.reload()
                 expect(limited_row.locator('.server-count')).to_have_text('1')
@@ -532,7 +676,7 @@ def main():
                 page.locator('#save-provider').click()
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 expect(limited_row.locator('.server-count')).to_have_text('2')
-                expect(limited_row.locator('.provider-sample-note')).to_have_count(0)
+                expect(provider_details(limited_row).locator('.provider-sample-note')).to_have_text('2 fetched · 2 selected · all servers')
                 assert len(seen) == before_limit_fetches
                 page.set_viewport_size({'width':1440, 'height':1000})
                 checks.append('per-provider random server limits validate, persist, show fetched/selected counts, and clear on mobile without another fetch')
@@ -545,16 +689,16 @@ def main():
                 expect(page.locator('#provider-dialog')).not_to_be_visible()
                 expect(page.locator('#provider-rows')).to_contain_text('Renamed provider')
                 expect(page.locator('#refresh-button')).to_be_enabled(timeout=15000)
-                paused_provider=page.locator('#provider-rows tr').filter(has_text='Demo 2')
+                paused_provider=page.locator('#provider-rows .provider-row').filter(has_text='Demo 2')
                 paused_provider.locator('.provider-actions summary').click()
                 paused_provider.locator('[data-action=toggle]').click()
                 expect(paused_provider).to_contain_text('Paused')
                 expect(paused_provider.locator('.provider-working')).to_have_text('0 working')
-                expect(paused_provider.locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
+                expect(provider_details(paused_provider).locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
                 paused_provider.locator('.provider-actions summary').click()
                 page.once('dialog', lambda dialog: dialog.accept())
                 paused_provider.locator('[data-action=delete]').click()
-                expect(page.locator('#provider-rows tr')).to_have_count(1)
+                expect(page.locator('#provider-rows .provider-row')).to_have_count(1)
                 checks.append('edit, pause and delete providers')
 
                 page.locator('.nav-item[data-page=devices]').click()
@@ -656,8 +800,8 @@ def main():
                     page.set_viewport_size({'width':1440, 'height':1000})
                     page.locator('.nav-item[data-page=providers]').click()
                     page.evaluate('loadState()')
-                    active = page.locator('#provider-rows tr').filter(has_text='Renamed provider')
-                    inactive = page.locator('#provider-rows tr').filter(has_text='Unchanged provider')
+                    active = page.locator('#provider-rows .provider-row').filter(has_text='Renamed provider')
+                    inactive = page.locator('#provider-rows .provider-row').filter(has_text='Unchanged provider')
                     active.locator('.provider-actions summary').click()
                     active.locator('[data-action=refresh]').click()
                     assert fetch_started.wait(5)
@@ -666,7 +810,7 @@ def main():
                     expect(page.locator('#job-progress-percent')).to_have_text('In progress')
                     assert page.locator('#job-progress-bar').get_attribute('aria-valuenow') is None
                     expect(active.locator('.provider-check-note')).to_have_text('Refreshing…')
-                    expect(inactive.locator('.provider-check-note')).to_have_count(0)
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Ready')
                     release_fetch.set()
                     assert check_started.wait(5)
                     expect(page.locator('#job-progress-title')).to_have_text('Checking connections · Renamed provider')
@@ -683,7 +827,7 @@ def main():
                     expect(page.locator('.refresh-label')).to_have_text('Refresh all')
                     expect(page.locator('#refresh-button.spinning')).to_have_count(0)
                     expect(active.locator('.provider-check-note')).to_have_text('Checking…')
-                    expect(inactive.locator('.provider-check-note')).to_have_count(0)
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Ready')
                     assert len(seen) == before_fetch + 1
                     assert seen[-1] == 'replacement-browser-hwid'
                     for name in ('overview', 'servers', 'exports', 'activity', 'devices', 'settings', 'providers'):
@@ -784,6 +928,8 @@ def main():
                     manager.fetcher, manager.checker = original_fetcher, original_checker
                 assert not manager.busy
                 checks.append('independent download and check controls, concurrent progress, reload and mobile layout')
+
+                check_large_provider_list(page, checks)
 
                 # Advance only the synthetic authentication clock, without
                 # sleeping or touching real devices / production enrollment.

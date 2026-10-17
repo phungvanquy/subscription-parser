@@ -29,6 +29,8 @@ let state=null,page='overview',toastTimer,pollTimer;
 let logRequest=0,selectedSubscription='default',subscriptionWorking=false;
 let securityAction='setup',securityWorking=false,securityRequest=0;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
+let providerPage=0;
+const expandedProviders=new Set();
 const titles={
   overview:['YOUR WORKSPACE','Overview','Your providers, connection checks and subscriptions at a glance.','Overview'],
   providers:['SUBSCRIPTION SOURCES','Providers','Manage your sources and see what’s working.','Providers'],
@@ -52,6 +54,7 @@ function showLogin(){
   $('login-factor').hidden=true;$('login-code').disabled=true;$('login-code').required=false;
   $('login-code').value='';$('admin-key').value='';$('login-error').textContent='';
   $('login-submit-label').textContent='Open workspace';state=null;
+  providerPage=0;expandedProviders.clear();$('provider-search').value='';$('provider-status-filter').value='';
 }
 function selectPage(name){
   page=name;
@@ -133,8 +136,6 @@ function renderProgress(){
 }
 function render(inventoryChanged=true){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
-  const providerServers=new Map(providers.map(p=>[p.name,[]]));
-  inventory.forEach(n=>n.sources.forEach(source=>providerServers.get(source)?.push(n)));
   $('nav-provider-count').textContent=providers.length;$('provider-total').textContent=providers.length;
   $('stat-providers').textContent=providers.filter(p=>p.enabled).length;$('stat-provider-detail').textContent=`${providers.length} providers in your workspace`;
   $('stat-servers').textContent=state.published_total||0;$('stat-duplicate-detail').textContent=`${state.total} nodes in library · ${state.duplicates_removed||0} duplicates combined`;
@@ -151,7 +152,7 @@ function render(inventoryChanged=true){
   $('last-connection-check').textContent=`Connections checked: ${relative(state.last_check)}`;
   $('last-connection-check').title=date(state.last_check);
   $('global-error').hidden=!state.last_error;if(state.last_error)$('global-error').textContent=state.last_error;
-  renderProviders(providerServers);
+  renderProviders();
   $('providers-empty').hidden=providers.length>0;
   renderSubscriptions();
   const selectedProvider=$('provider-filter').value;$('provider-filter').innerHTML='<option value="">All providers</option>'+providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');if(providers.some(p=>p.id===selectedProvider))$('provider-filter').value=selectedProvider;
@@ -164,44 +165,82 @@ function render(inventoryChanged=true){
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
   $('footer-time').textContent=state.generated_at?`Feeds rebuilt ${date(state.generated_at)}`:'';
 }
-function renderProviders(providerServers){
+function renderProviders(){
+  if(!state)return;
+  const providerServers=new Map(state.providers.map(p=>[p.name,[]]));
+  (state.inventory||[]).forEach(n=>n.sources.forEach(source=>providerServers.get(source)?.push(n)));
+  const query=$('provider-search').value.trim().toLocaleLowerCase(),filter=$('provider-status-filter').value;
+  const matches=state.providers.map(p=>{
+    const servers=providerServers.get(p.name),working=servers.filter(n=>n.clients.length>0).length;
+    const device=p.hwid_id===null?'No device ID':state.hwids.find(h=>h.id===p.hwid_id)?.name||'Missing device';
+    return {p,servers,working,device};
+  }).filter(({p,working,device})=>`${p.name} ${p.host} ${device}`.toLocaleLowerCase().includes(query)&&(
+    !filter||filter==='enabled'&&p.enabled||filter==='paused'&&!p.enabled||filter==='passing'&&p.enabled&&working>0||
+    filter==='attention'&&p.enabled&&(p.error||['cached','unavailable'].includes(p.status)||!working)));
+  const size=Number($('provider-page-size').value),pages=Math.max(1,Math.ceil(matches.length/size));
+  providerPage=Math.max(0,Math.min(providerPage,pages-1));
+  const start=providerPage*size,visible=matches.slice(start,start+size);
+  for(const id of expandedProviders)if(!state.providers.some(p=>p.id===id))expandedProviders.delete(id);
   const rows=$('provider-rows'),expanded=new Set([...rows.querySelectorAll('details[open]')].map(el=>el.id));
   const focused=rows.contains(document.activeElement)?document.activeElement.id:null;
-  setHTML('provider-rows',state.providers.map((p,i)=>{
-    const device=p.hwid_id===null?'No device ID':state.hwids.find(h=>h.id===p.hwid_id)?.name||'Missing device';
+  setHTML('provider-rows',visible.map(({p,servers,working,device})=>{
     const status={fresh:'Up to date',cached:'Cached',unavailable:'Unavailable',disabled:'Paused',pending:'Pending'}[p.status]||p.status;
-    const menuId=`provider-menu-${p.id}`;
-    return `<tr data-provider="${esc(p.id)}">
-      <td class="provider-identity"><div class="provider-cell"><span class="provider-avatar ${['','violet','blue'][i%3]}">${esc(p.name.slice(0,1))}</span><div class="provider-identity-copy"><span class="provider-name" title="${esc(p.name)}">${esc(p.name)}</span><span class="provider-host" title="${esc(p.host)}">${esc(p.host)}</span></div></div></td>
-      <td class="provider-servers">${providerServerCell(p,providerServers.get(p.name),expanded)}</td>
-      <td class="provider-device"><span class="provider-meta-label">Device</span><span class="device-label" title="${esc(device)}">${esc(device)}</span></td>
-      <td class="provider-fetch"><span class="provider-meta-label">Last fetch</span><span class="status-pill ${esc(p.status)}" title="${esc(p.error||'')}">${esc(status)}</span><span class="provider-fetch-time" title="${esc(date(p.fetched_at))}">${relative(p.fetched_at)}</span>${p.error?`<span class="provider-fetch-error" title="${esc(p.error)}">${esc(p.error)}</span>`:''}</td>
+    const menuId=`provider-menu-${p.id}`,detailsId=`provider-clients-${p.id}`,open=expandedProviders.has(p.id);
+    const note=providerCheckNote(p,servers,working),total=p.selection_pending&&servers.length?servers.length:p.count||0;
+    return `<tr class="provider-row ${open?'is-expanded':''}" data-provider="${esc(p.id)}">
+      <td class="provider-identity"><div class="provider-cell"><button id="provider-breakdown-${esc(p.id)}" class="icon-button provider-expand" data-provider-details="${esc(p.id)}" aria-expanded="${open}" aria-controls="${esc(detailsId)}" aria-label="Details for ${esc(p.name)}" title="Provider details">${icon('chevron')}</button><div class="provider-identity-copy"><span class="provider-name" title="${esc(p.name)}">${esc(p.name)}</span><span class="provider-host" title="${esc(p.host)}">${esc(p.host)}</span></div></div></td>
+      <td class="provider-servers"><div class="provider-server-summary"><button id="provider-working-${esc(p.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(p.id)}" aria-label="View ${working} working servers from ${esc(p.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${total}</span> <span class="provider-total-kind">${p.selection_pending&&servers.length?'active':p.server_limit?'selected':'total'}</span></span></div></td>
+      <td class="provider-health"><span class="provider-check-note ${!note&&working?'is-ready':''}" title="${esc(note||(working?'Ready':'No servers'))}">${esc(note||(working?'Ready':'No servers'))}</span>${p.error?`<span class="provider-fetch-warning" title="${esc(p.error)}">${esc(status)} · fetch issue</span>`:''}</td>
+      <td class="provider-fetch"><span class="status-pill ${esc(p.status)}" title="${esc(p.error||'')}">${esc(status)}</span><span class="provider-fetch-time" title="${esc(date(p.fetched_at))}">${relative(p.fetched_at)}</span></td>
       <td class="provider-actions-cell"><details id="${esc(menuId)}" class="action-menu provider-actions" ${expanded.has(menuId)?'open':''}><summary id="provider-actions-${esc(p.id)}" aria-label="Actions for ${esc(p.name)}" title="Provider actions">${icon('more')}</summary><div class="action-menu-items">
         <button id="provider-refresh-${esc(p.id)}" data-action="refresh" data-id="${esc(p.id)}" ${state.refresh_running||(state.busy&&!state.check_running)||!p.enabled?'disabled':''}>${icon('refresh')}Refresh provider</button>
         <button id="provider-edit-${esc(p.id)}" data-action="edit" data-id="${esc(p.id)}">${icon('edit')}Edit provider</button>
         <button id="provider-toggle-${esc(p.id)}" data-action="toggle" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon(p.enabled?'pause':'play')}${p.enabled?'Pause':'Enable'} provider</button>
         <button id="provider-delete-${esc(p.id)}" class="danger-text" data-action="delete" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon('trash')}Remove provider</button>
       </div></details></td>
-    </tr>`;
+    </tr><tr id="${esc(detailsId)}" class="provider-detail-row" ${open?'':'hidden'}><td colspan="5"><div class="provider-detail-content">
+      <div class="provider-detail-heading"><strong>${esc(p.name)}</strong><span>${esc(p.host)}</span></div>
+      <div class="provider-detail-grid"><div><span class="provider-detail-label">Selection</span><span class="provider-sample-note">${p.fetched_count??p.count??0} fetched · ${p.count||0} selected · ${p.server_limit?`random limit ${p.server_limit}`:'all servers'}</span>${p.selection_pending?`<span class="provider-sample-note">${p.count||0} selected for next checks${servers.length?' · previous selection stays active':''}</span>`:''}</div>
+      <div><span class="provider-detail-label">Device</span><span class="device-label">${esc(device)}</span></div>
+      <div><span class="provider-detail-label">Last fetch</span><span>${esc(status)} · ${esc(date(p.fetched_at))}</span>${p.error?`<span class="provider-fetch-error">${esc(p.error)}</span>`:''}</div>
+      <div><span class="provider-detail-label">Connections</span><span>${esc(note||(working?'Ready':'No servers'))}</span></div></div>
+      <span class="provider-detail-label">Working servers by client</span>${providerClientCounts(servers)}
+    </div></td></tr>`;
   }).join(''));
+  $('provider-toolbar').hidden=!state.providers.length;
+  $('provider-table-wrap').hidden=!matches.length;
+  $('providers-no-results').hidden=!state.providers.length||!!matches.length;
+  $('provider-list-footer').hidden=!state.providers.length;
+  const range=matches.length?`${start+1}–${start+visible.length} of ${matches.length}`:'0';
+  $('provider-footer').textContent=`${range} providers${query||filter?` · ${state.providers.length} total`:''}`;
+  $('provider-page-label').textContent=`${providerPage+1} / ${pages}`;
+  $('provider-previous').disabled=providerPage===0;$('provider-next').disabled=providerPage>=pages-1;
   if(focused)$(focused)?.focus({preventScroll:true});
 }
-function providerServerCell(provider,servers,expanded){
-  const working=servers.filter(n=>n.clients.length>0).length;
-  const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];
+function providerCheckNote(provider,servers,working){
   const statuses=servers.flatMap(n=>Object.values(n.connectivity||{}).map(value=>value.status));
   const fetching=state.refresh_running&&(!state.refresh_provider_id||state.refresh_provider_id===provider.id);
   const checking=state.check_running&&(!state.check_provider_ids||state.check_provider_ids.includes(provider.id));
-  const note=!provider.enabled?'Paused':fetching&&checking?'Refreshing and checking…':fetching?'Refreshing…':checking?'Checking…':provider.selection_pending?'New selection awaiting checks':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
-  const total=provider.selection_pending&&servers.length?servers.length:provider.count||0;
-  const detailsId=`provider-clients-${provider.id}`;
-  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${total}</span> ${provider.selection_pending&&servers.length?'active':provider.server_limit?'selected':'total'}</span></div>
-    ${provider.server_limit?`<small class="provider-sample-note">${provider.fetched_count??provider.count??0} fetched · random limit ${provider.server_limit}</small>`:''}
-    ${provider.selection_pending?`<small class="provider-sample-note">${provider.count||0} selected for next checks${servers.length?' · previous selection stays active':''}</small>`:''}
-    ${note?`<small class="provider-check-note">${note}</small>`:''}
-    <details id="${esc(detailsId)}" class="provider-client-details" ${expanded.has(detailsId)?'open':''}><summary id="provider-breakdown-${esc(provider.id)}">By client ${icon('chevron')}</summary><div class="provider-client-counts" role="group" aria-label="Working servers by client">${clients.map(([client,label])=>`<span>${label}<strong>${servers.filter(n=>n.clients.includes(client)).length}</strong></span>`).join('')}</div></details>`;
+  return !provider.enabled?'Paused':fetching&&checking?'Refreshing and checking…':fetching?'Refreshing…':checking?'Checking…':provider.selection_pending?'New selection awaiting checks':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
 }
+function providerClientCounts(servers){
+  const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];
+  return `<div class="provider-client-counts" role="group" aria-label="Working servers by client">${clients.map(([client,label])=>`<span>${label}<strong>${servers.filter(n=>n.clients.includes(client)).length}</strong></span>`).join('')}</div>`;
+}
+$('provider-search').addEventListener('input',()=>{providerPage=0;renderProviders();});
+$('provider-status-filter').addEventListener('change',()=>{providerPage=0;renderProviders();});
+$('provider-page-size').addEventListener('change',()=>{providerPage=0;renderProviders();});
+$('clear-provider-filters').addEventListener('click',()=>{$('provider-search').value='';$('provider-status-filter').value='';providerPage=0;renderProviders();$('provider-search').focus();});
+function changeProviderPage(delta){providerPage+=delta;renderProviders();$('provider-toolbar').scrollIntoView({block:'start'});}
+$('provider-previous').addEventListener('click',()=>changeProviderPage(-1));
+$('provider-next').addEventListener('click',()=>changeProviderPage(1));
 $('provider-rows').addEventListener('click',event=>{
+  const details=event.target.closest('[data-provider-details]');
+  if(details){
+    const id=details.dataset.providerDetails;
+    if(expandedProviders.has(id))expandedProviders.delete(id);else expandedProviders.add(id);
+    renderProviders();return;
+  }
   const button=event.target.closest('[data-provider-servers]');if(!button)return;
   $('provider-filter').value=button.dataset.providerServers;
   $('server-search').value='';$('protocol-filter').value='';$('client-filter').value='';$('connection-filter').value='passing';
