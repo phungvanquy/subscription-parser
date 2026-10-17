@@ -100,8 +100,7 @@ def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscripti
             manager.stop.set()
             if worker:
                 worker.join(timeout=3)
-            if manager.worker:
-                manager.worker.join(timeout=60)
+            manager.wait_for_idle(timeout=60)
             manager.logs.write('stopped')
 
     app = FastAPI(title="subscription_parser", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)

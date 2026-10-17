@@ -14,7 +14,7 @@ import threading
 import time
 
 
-from . import common, connectivity, protocols, publication
+from . import common, connectivity, protocols, publication, pipeline
 from .config import MAX_PROVIDERS, env_int
 from .fetch import bounded_fetch_subscription
 from .debug_log import DebugLog
@@ -40,6 +40,10 @@ class Manager:
         env_int('PARSER_CHECK_WORKERS', connectivity.WORKERS, 1, 128)
         env_int('PARSER_CHECK_BATCH_SECONDS', connectivity.BATCH_TIMEOUT, 1, 300)
         self.parsed_cache = {}
+        self.selection_cache = {}
+        self.latest_selections = {}
+        self.inflight_selections = set()
+        self.selection_directory = self.store.directory / 'selections'
         self.scope_cache = {}
         self.published_scopes = {}
         self.publication_keys = {}
@@ -52,10 +56,16 @@ class Manager:
         self.next_check = time.time()
         self.stop = threading.Event()
         self.worker = None
+        self.refresh_worker = self.check_worker = None
+        self.refresh_running = self.check_running = False
+        self.refresh_provider_id = None
+        self.check_provider_ids = None
+        self.refresh_progress = {'done': 0, 'total': 0}
+        self.check_phase = 'checking'
+        self.running_check_id = None
         self.previews = {}
         self.job_path = self.store.directory / 'job.json'
-        self.job_active = False
-        self.resume_job = None
+        self.jobs = pipeline.Jobs(self.store.directory)
         self.snapshot_path = self.store.directory / "snapshot.json"
         self.snapshot = json.loads(self.snapshot_path.read_text()) if self.snapshot_path.exists() else {
             "generated_at": None, "providers": {}, "inventory": [], "diagnostics": [], "counts": {}, "total": 0,
@@ -67,7 +77,7 @@ class Manager:
             self.store.config()['check_seconds'], batch_due=self.next_check_batch)
         self.next_check = min(self.next_check, self.snapshot.get('next_check', self.next_check))
         if self.snapshot.get('generated_at'):
-            self.next_refresh = time.time() + self.store.config()['refresh_seconds']
+            self.next_refresh = self.snapshot.get('next_refresh', time.time() + self.store.config()['refresh_seconds'])
         # A saved pre-JSON publication uses "v2board" for its URI count.
         # Keep those feeds available with correct labels until the first check.
         for saved in [self.snapshot, *self.snapshot.get('publications', {}).values()]:
@@ -100,9 +110,61 @@ class Manager:
                 job = json.loads(common.read_limited(self.job_path))
                 if job.get('kind') not in {'refresh', 'check'} or not isinstance(job.get('provider_id'), (str, type(None))):
                     raise ValueError('invalid saved job')
-                self.resume_job = job
+                if job['kind'] not in self.jobs.items:
+                    self.jobs.put(job['kind'], provider_ids=[job['provider_id']] if job.get('provider_id') else None,
+                                  provider_id=job.get('provider_id'), reuse_recent=True, regular=job['kind'] == 'check')
+                self.job_path.unlink()
             except (OSError, ValueError, AttributeError, common.SubscriptionError) as error:
                 self.logs.write('scheduler_failed', error=error)
+        # Pin the old published selection before any worker can replace a cache.
+        # Existing schema-7 deployments need no database migration.
+        if self.snapshot.get('generated_at') and 'active_selections' not in self.snapshot:
+            active = {}
+            if self.snapshot.get('sources_key') == self.sources_key():
+                for provider in self.store.config()['providers']:
+                    if provider['enabled']:
+                        _, status = self.fetch(provider, False)
+                        if status.get('_generation'):
+                            active[provider['id']] = status['_generation']
+            self.snapshot['active_selections'] = active
+            common.atomic_write(self.snapshot_path, common.json_text(self.snapshot))
+        self.provider_statuses = dict(self.snapshot.get('providers', {}))
+
+    def pin_selection(self, provider, cache, parsed):
+        """An immutable response + draw, referenced by the atomic snapshot."""
+        document = {**cache, 'name': provider['name'], 'server_limit': provider.get('server_limit')}
+        encoded = common.json_text(document)
+        generation = hashlib.sha256(encoded.encode()).hexdigest()
+        path = self.selection_directory / (generation + '.json')
+        if not path.exists():
+            common.atomic_write(path, encoded)
+        parsed['generation'] = generation
+        self.selection_cache[generation] = parsed
+        self.latest_selections[provider['id']] = generation
+        return generation
+
+    def read_selection(self, provider, generation):
+        if not isinstance(generation, str) or len(generation) != 64 or any(c not in '0123456789abcdef' for c in generation):
+            return None
+        key = (self.request_fingerprint(provider), provider['name'], provider.get('server_limit'), checked_combine)
+        with self.cache_guard:
+            parsed = self.selection_cache.get(generation)
+            if parsed and parsed['key'] == key:
+                return parsed
+        try:
+            cache = json.loads(common.read_limited(self.selection_directory / (generation + '.json'),
+                                                   common.MAX_BYTES * 4 // 3 + 65536))
+            if (cache['fingerprint'], cache['name'], cache['server_limit']) != key[:3]:
+                return None
+            body = base64.b64decode(cache['body'], validate=True)
+            entries, count, digest = self.provider_entries(body, provider, cache.get('sample_seed'))
+            parsed = {'key': key, 'entries': entries, 'fetched_count': count, 'digest': digest,
+                      'metadata': cache['metadata'], 'generation': generation}
+            with self.cache_guard:
+                self.selection_cache[generation] = parsed
+            return parsed
+        except (OSError, ValueError, KeyError, common.SubscriptionError):
+            return None
 
     def request_fingerprint(self, provider, revisions=None):
         identifier = provider['hwid_id']
@@ -175,6 +237,11 @@ class Manager:
         cached = {'key': key, 'stamp': stamp, 'digest': digest, 'body_digest': hashlib.sha256(body).hexdigest(),
                   'entries': entries, 'metadata': cache['metadata'], 'fetched_count': fetched_count, 'validated': False}
         with self.cache_guard:
+            if self.cache_stamp(path) != stamp:
+                # A download won the race while the old response was parsing.
+                # Never replace its generation pointer with the older response.
+                return self.read_cached(provider, fingerprint, path)
+            self.pin_selection(provider, cache, cached)
             self.parsed_cache[provider['id']] = cached
         return cached
 
@@ -207,13 +274,17 @@ class Manager:
                 if not any(accepted["counts"].values()):
                     raise common.SubscriptionError("provider response has no client-accepted servers")
             with self.cache_guard:
-                common.atomic_write(cache_path, common.json_text({"fingerprint": fingerprint, "metadata": metadata,
-                    "body": base64.b64encode(body).decode(), 'sample_seed': seed}))
-                self.parsed_cache[provider['id']] = {'key': key, 'stamp': self.cache_stamp(cache_path),
+                response = {"fingerprint": fingerprint, "metadata": metadata,
+                            "body": base64.b64encode(body).decode(), 'sample_seed': seed}
+                parsed = {'key': key,
                     'digest': digest, 'body_digest': body_digest, 'entries': entries, 'metadata': metadata,
                     'fetched_count': fetched_count, 'validated': True}
+                generation = self.pin_selection(provider, response, parsed)
+                common.atomic_write(cache_path, common.json_text(response))
+                parsed['stamp'] = self.cache_stamp(cache_path)
+                self.parsed_cache[provider['id']] = parsed
             status.update(status="fresh", fetched_at=metadata.get("fetched_at", common.now()),
-                          fetched_count=fetched_count, _content_key=digest)
+                          fetched_count=fetched_count, _content_key=digest, _generation=generation)
         except (common.SubscriptionError, OSError, ValueError, LookupError, RecursionError) as exc:
             if not isinstance(exc, LookupError):
                 status["error"] = str(exc) if isinstance(exc, common.SubscriptionError) else "provider could not be fetched or parsed"
@@ -221,10 +292,10 @@ class Manager:
             try:
                 cache = self.read_cached(provider, fingerprint, cache_path)
                 entries = cache['entries']
-                previous = self.snapshot.get("providers", {}).get(provider["id"], {})
+                previous = getattr(self, 'provider_statuses', self.snapshot.get('providers', {})).get(provider['id'], {})
                 status.update(status="cached" if download else previous.get("status", "cached"),
                               fetched_at=cache["metadata"].get("fetched_at"),
-                              fetched_count=cache['fetched_count'], _content_key=cache['digest'])
+                              fetched_count=cache['fetched_count'], _content_key=cache['digest'], _generation=cache['generation'])
                 if not download and previous.get("error"):
                     status["error"] = previous["error"]
                 if download:
@@ -237,7 +308,7 @@ class Manager:
         status.update(count=len(unique), protocols=dict(Counter(e.protocol for e in unique.values())))
         return entries, status
 
-    def prepare_scopes(self, config, by_provider, statuses):
+    def prepare_scopes(self, config, by_provider, statuses, *, namespace='active'):
         enabled = [p for p in config['providers'] if p['enabled']]
         selections = {'all': enabled}
         for subscription in self.store.subscriptions():
@@ -250,7 +321,7 @@ class Manager:
             signature = (checked_combine, tuple((p['id'], p['name'], statuses[p['id']].get('_content_key'))
                                                for p in providers))
             with self.cache_guard:
-                cached = self.scope_cache.get(key)
+                cached = self.scope_cache.get((namespace, key))
             if cached and cached[0] == signature:
                 scopes[key] = cached[1]
                 continue
@@ -260,9 +331,9 @@ class Manager:
             self.log_validation(accepted)
             scopes[key] = (nodes, accepted['validation'])
             with self.cache_guard:
-                self.scope_cache[key] = (signature, scopes[key])
+                self.scope_cache[namespace, key] = (signature, scopes[key])
         with self.cache_guard:
-            self.scope_cache = {key: value for key, value in self.scope_cache.items() if key in selections}
+            self.scope_cache = {key: value for key, value in self.scope_cache.items() if key[1] in selections}
             identifiers = {p['id'] for p in config['providers']}
             self.parsed_cache = {key: value for key, value in self.parsed_cache.items() if key in identifiers}
         return scopes
@@ -338,11 +409,9 @@ class Manager:
                 if not scopes:
                     # Restore prepared configurations once after a restart. No
                     # provider requests or connectivity probes happen here.
-                    by_provider, statuses = {}, {}
-                    for provider in config['providers']:
-                        if provider['enabled']:
-                            by_provider[provider['id']], statuses[provider['id']] = self.fetch(provider, False)
-                    scopes = self.prepare_scopes(config, by_provider, statuses)
+                    by_provider, statuses = self._collect(config)
+                    active, statuses, _ = self._active_sources(config, by_provider, statuses)
+                    scopes = self.prepare_scopes(config, active, statuses)
                 updated = dict(snapshot)
                 publications = dict(snapshot.get('publications', {}))
                 for key in expired:
@@ -368,210 +437,418 @@ class Manager:
             except Exception as error:
                 self.logs.write('run_failed', operation='publication expiry', stage='publish', error=error)
 
-    def refresh(self, selected=None, download=True, check=None, reuse_recent=False, *, _during_download=False):
+    def _sync_busy(self):
+        self.busy = self.refresh_running or self.check_running
+        self.busy_action = ('fetching_and_checking' if self.refresh_running and self.check_running else
+                            'fetching' if self.refresh_running else self.check_phase if self.check_running else None)
+        self.busy_provider_id = (self.refresh_provider_id if self.refresh_running else
+                                self.check_provider_ids[0] if self.check_running and self.check_provider_ids
+                                and len(self.check_provider_ids) == 1 else None)
+
+    def _collect(self, config):
+        nodes, statuses = {}, {}
+        for provider in config['providers']:
+            if provider['enabled']:
+                nodes[provider['id']], statuses[provider['id']] = self.fetch(provider, False)
+            else:
+                statuses[provider['id']] = {'id': provider['id'], 'status': 'disabled', 'count': 0, 'protocols': {}}
+        return nodes, statuses
+
+    def _active_sources(self, config, nodes, statuses):
+        active_nodes, active_statuses, versions = {}, dict(statuses), {}
+        for provider in config['providers']:
+            if not provider['enabled']:
+                continue
+            identifier = provider['id']
+            generation = self.snapshot.get('active_selections', {}).get(identifier)
+            saved = self.read_selection(provider, generation)
+            if saved:
+                active_nodes[identifier] = saved['entries']
+                active_statuses[identifier] = {**statuses[identifier], '_content_key': saved['digest']}
+                versions[identifier] = generation
+            else:
+                # New provider or changed credentials/limit: never retain a
+                # selection which violates the current provider configuration.
+                active_nodes[identifier] = nodes[identifier]
+                if statuses[identifier].get('_generation'):
+                    versions[identifier] = statuses[identifier]['_generation']
+        return active_nodes, active_statuses, versions
+
+    def _queue_check(self, identifiers=None, *, reuse_recent=True, regular=False):
+        with self.guard:
+            old = self.jobs.items.get('check')
+            if old:
+                previous = old.get('provider_ids')
+                identifiers = None if previous is None or identifiers is None else sorted(set(previous) | set(identifiers))
+                if old['id'] != self.running_check_id:
+                    reuse_recent = reuse_recent and old.get('reuse_recent', True)
+                    regular = regular or old.get('regular', False)
+            job = self.jobs.put('check', provider_ids=identifiers, reuse_recent=reuse_recent, regular=regular)
+            return job
+
+    def _record_failure(self, operation, error):
+        self.logs.write('run_failed', operation=operation, stage='fetch' if operation == 'refresh' else 'check', error=error)
+        with self.guard:
+            self.snapshot = {**self.snapshot,
+                'last_error': f'{operation} failed; the last completed subscription is still available'}
+
+    def _download(self, job, *, autostart=True):
         started = time.monotonic()
-        started_at = time.time()
-        completed = False
-        check = download if check is None else check
-        operation = 'refresh' if download else 'connection check' if check else 'configuration update'
-        stage = 'fetch'
-        self.logs.write('run_started', operation=operation, provider_id=selected)
+        selected = job.get('provider_id')
+        self.logs.write('run_started', operation='refresh', provider_id=selected)
         try:
-            with self.guard:
-                self.busy = True
-                self.busy_action = 'fetching' if download else 'checking' if check else 'updating'
-                self.busy_provider_id = selected
-                self.check_progress = {'done': 0, 'total': 0}
             config = self.store.config()
-            batch_check = check and selected is None and (not reuse_recent or started_at >= self.next_check_batch)
-            sources_key = self.sources_key(config)
-            enabled = [p for p in config["providers"] if p["enabled"]]
-            statuses, by_provider = {}, {}
-            checked_during_download = False
-            with ThreadPoolExecutor(max_workers=self.fetch_workers) as pool:
-                remaining = iter(enabled)
-                jobs = {}
+            requested = job.get('provider_ids')
+            providers = [p for p in config['providers'] if p['enabled']
+                         and (requested is None or p['id'] in requested)]
+            remaining_ids = {p['id'] for p in providers}
+            with self.guard:
+                self.refresh_progress = {'done': 0, 'total': len(providers)}
+            with ThreadPoolExecutor(max_workers=self.fetch_workers, thread_name_prefix='provider-fetch') as pool:
+                remaining, active = iter(providers), {}
                 def fill():
-                    while len(jobs) < self.fetch_workers and not self.stop.is_set():
+                    while len(active) < self.fetch_workers and not self.stop.is_set():
                         provider = next(remaining, None)
                         if provider is None:
                             break
-                        jobs[pool.submit(self.fetch, provider,
-                            download and (selected is None or provider['id'] == selected))] = provider
+                        active[pool.submit(self.fetch, provider)] = provider
                 fill()
-                last_checkpoint = time.monotonic()
-                while jobs:
-                    finished, _ = wait(jobs, timeout=0.25, return_when=FIRST_COMPLETED)
-                    for job in finished:
-                        provider = jobs.pop(job)
-                        found, status = job.result()
-                        by_provider[provider['id']] = found
-                        statuses[provider['id']] = status
-                    fill()
-                    # Download workers keep running independently. Recheck and
-                    # publish cached/completed providers during a slow refresh,
-                    # so a stalled upstream cannot hold the health schedule.
-                    # Give a new library a short gathering window before its
-                    # first publication, avoiding repeated startup rebuilds.
-                    checkpoint_after = 1 if self.snapshot.get('total') else 5
-                    if (download and selected is None and jobs and not self.stop.is_set()
-                            and time.monotonic() - last_checkpoint >= checkpoint_after
-                            and (time.time() >= self.next_check or time.monotonic() - last_checkpoint >= 60)):
-                        self.refresh(download=False, check=True, reuse_recent=True, _during_download=True)
-                        checked_during_download = True
+                while active:
+                    finished, _ = wait(active, timeout=.25, return_when=FIRST_COMPLETED)
+                    for future in finished:
+                        provider = active.pop(future)
+                        _, status = future.result()
+                        identifier = provider['id']
                         with self.guard:
-                            self.busy_action = 'fetching'
-                            self.check_progress = {'done': 0, 'total': 0}
-                        last_checkpoint = time.monotonic()
-                for provider in enabled:
-                    if provider['id'] not in by_provider:
-                        by_provider[provider['id']], statuses[provider['id']] = self.fetch(provider, False)
-            for provider in config["providers"]:
-                if not provider["enabled"]:
-                    statuses[provider["id"]] = {"id": provider["id"], "status": "disabled", "count": 0, "protocols": {}}
-            stage = 'validate'
-            scopes = self.prepare_scopes(config, by_provider, statuses)
-            results = self.snapshot.get('connectivity', {})
-            checked = 0
-            if check:
-                stage = 'check'
-                with self.guard:
-                    self.busy_action = 'checking'
-                def progress(done, total):
-                    with self.guard:
-                        self.check_progress = {'done': done, 'total': total}
-                previous = results
-                check_entries = [entry for nodes, _ in scopes.values() for entry in connectivity.unique_entries(nodes)]
-                targets = None
-                if selected is not None:
-                    names = {provider['name'] for provider in enabled if provider['id'] == selected}
-                    # Include the selected provider's own native variants, even
-                    # when another provider supplies the default shared variant;
-                    # preserve other providers' exact variants without probing.
-                    check_entries = [entry for nodes, _ in scopes.values() for entry in nodes]
-                    selected_entries = [entry for entry in check_entries if entry.source in names]
-                    targets = set()
-                    for entry in selected_entries:
-                        for core in connectivity.CORES:
-                            if core not in entry.outputs:
-                                continue
-                            try:
-                                targets.add((entry.identity, core, connectivity.fingerprint(entry, core)))
-                            except protocols.Error:
-                                continue
-                reuse_seconds = ((connectivity.BATCH_REUSE_SECONDS if batch_check else config['check_seconds'])
-                                 if reuse_recent else 0)
-                if checked_during_download:
-                    reuse_seconds = max(reuse_seconds, min(config['check_seconds'], time.time() - started_at))
-                results = self.checker(check_entries, self.store.root, stop=self.stop,
-                                       previous=results, progress=progress, targets=targets,
-                                       reuse_seconds=reuse_seconds)
-                checked = self.log_checks(previous, results, changed_only=True)
-            stage = 'publish'
-            with self.guard:
-                self.busy_action = 'updating'
-            max_age = config['check_seconds'] * 2
-            evaluated_at = time.time()
-            generated = common.now()
-            last_check = generated if checked else self.snapshot.get('last_check')
-            last_download = max((stamp for stamp in [self.snapshot.get('last_download'),
-                *(status.get('fetched_at') for status in statuses.values())] if stamp), default=None)
-            next_batch = started_at + config['check_seconds'] if batch_check else self.next_check_batch
-            publications, publication_keys, pending = self.build_publications(scopes, results, max_age,
-                evaluated_at, generated, last_check)
-            combined = publications.pop('all')
-            next_check = self.next_check
-            if check and selected is None:
-                next_check = connectivity.next_check_at(results, config['check_seconds'], batch_due=next_batch)
-            elif check:
-                # Resume unfinished selected work sooner, without postponing an
-                # already-due global check while this provider was refreshing.
-                next_check = min(next_check, connectivity.next_check_at(results,
-                    config['check_seconds'], batch_due=next_check))
-            elif not check and pending:
-                next_check = min(next_check, time.time() + 5)
-            event = {"at": generated, "seconds": round(time.monotonic() - started, 2), "servers": combined["total"],
-                     "published": combined['published_total'],
-                     "fresh": sum(s["status"] == "fresh" for s in statuses.values()),
-                     "cached": sum(s["status"] == "cached" for s in statuses.values()),
-                     "action": "refresh" if download else "connection check" if check else "configuration updated"}
-            if selected is not None:
-                event['provider_id'] = selected
-            event['checked'] = checked
-            snapshot = {k: v for k, v in combined.items() if k not in {*protocols.TARGETS, 'last_error'}}
-            snapshot.update(providers=statuses, publications=publications, connectivity=results, sources_key=sources_key,
-                            last_download=last_download, next_check_batch=next_batch, next_check=next_check,
-                            history=([event] + self.snapshot.get("history", []))[:20])
-            with self.publish_guard:
+                            self.provider_statuses[identifier] = status
+                            # Persist check intent before acknowledging this download.
+                            self._queue_check([identifier], reuse_recent=job.get('reuse_recent', True))
+                            remaining_ids.discard(identifier)
+                            job = self.jobs.put('refresh', provider_ids=sorted(remaining_ids), provider_id=selected,
+                                                reuse_recent=job.get('reuse_recent', True))
+                            self.refresh_progress['done'] += 1
+                    fill()
+            with self.publish_guard, self.guard:
+                generated = common.now()
+                statuses = dict(self.provider_statuses)
+                last_download = max((stamp for stamp in [self.snapshot.get('last_download'),
+                    *(s.get('fetched_at') for s in statuses.values())] if stamp), default=None)
+                event = {'at': generated, 'seconds': round(time.monotonic() - started, 2),
+                         'action': 'refresh', 'servers': sum(s.get('count', 0) for s in statuses.values()),
+                         'published': self.snapshot.get('published_total', 0), 'checked': 0,
+                         'fresh': sum(s.get('status') == 'fresh' for s in statuses.values()),
+                         'cached': sum(s.get('status') == 'cached' for s in statuses.values())}
+                if selected:
+                    event['provider_id'] = selected
+                if selected is None:
+                    self.next_refresh = time.time() + config['refresh_seconds']
+                snapshot = {**self.snapshot, 'providers': statuses, 'last_download': last_download,
+                            'next_refresh': self.next_refresh,
+                            'history': ([event] + self.snapshot.get('history', []))[:20]}
                 common.atomic_write(self.snapshot_path, common.json_text(snapshot))
-                with self.guard:
-                    if combined is not self.snapshot:
-                        self.state_revision = secrets.token_hex(8)
-                    self.snapshot = snapshot
-                    self.next_check_batch = next_batch
-                    self.next_check = next_check
-                    self.published_scopes = scopes
-                    self.publication_keys = publication_keys
-                    completed = True
-            self.logs.write('run_completed', operation=operation, servers=event['servers'], published=event['published'],
-                            cached=event['cached'], seconds=event['seconds'])
+                self.snapshot = snapshot
+                self.state_revision = secrets.token_hex(8)
+                if not remaining_ids:
+                    self.jobs.clear('refresh', job)
+                self.logs.write('run_completed', operation='refresh', servers=event['servers'],
+                                published=event['published'], cached=event['cached'], seconds=event['seconds'])
         except Exception as error:
-            self.logs.write('run_failed', operation=operation, stage=stage, error=error)
-            # Details can contain upstream secrets; expose only a fixed error.
+            self._record_failure('refresh', error)
             with self.guard:
-                self.snapshot = {**self.snapshot,
-                    'last_error': 'refresh failed; the last completed subscription is still available'}
+                if self.jobs.items.get('refresh'):
+                    self._retry_job('refresh', self.jobs.items['refresh'], 30)
         finally:
             with self.guard:
-                if not _during_download:
-                    self.busy = False
-                    self.busy_action = None
-                    self.busy_provider_id = None
-                    if self.job_active:
-                        if completed:
-                            self.job_path.unlink(missing_ok=True)
-                        self.job_active = False
-                config = self.store.config()
-                if download and selected is None:
-                    self.next_refresh = time.time() + config['refresh_seconds']
-                if check and selected is None and not completed:
-                    self.next_check = time.time() + 30
+                self.refresh_running = False
+                self.refresh_provider_id = None
+                self._sync_busy()
+            self._clean_selections()
+            if autostart and not self.stop.is_set():
+                self._start_queued_check()
+
+    def _publish(self, incoming=None, captured=None, *, event=None, next_batch=None, global_check=False):
+        """Commit health and selection promotion together; probes run outside this lock."""
+        with self.publish_guard:
+            config = self.store.config()
+            sources_key = self.sources_key(config)
+            candidates, statuses = self._collect(config)
+            versions = {identifier: status.get('_generation') for identifier, status in statuses.items()}
+            candidate_scopes = self.prepare_scopes(config, candidates, statuses, namespace='candidate')
+            active_nodes, active_statuses, active = self._active_sources(config, candidates, statuses)
+            with self.guard:
+                previous = self.snapshot
+            results = previous.get('connectivity', {})
+            candidate_entries = [entry for nodes, _ in candidate_scopes.values() for entry in nodes]
+            by_source = {p['name']: [] for p in config['providers'] if p['enabled']}
+            for entry in candidate_entries:
+                by_source[entry.source].append(entry)
+            required = {p['id']: pipeline.configurations(by_source[p['name']])
+                        for p in config['providers'] if p['enabled']}
+            allowed = set().union(*(keys for identifier, keys in required.items()
+                                  if captured is None or captured.get(identifier) == versions.get(identifier)))
+            if incoming is not None:
+                results = pipeline.merge_results(results, incoming, allowed)
+            coverage = {}
+            now = time.time()
+            for provider in config['providers']:
+                identifier = provider['id']
+                generation = versions.get(identifier)
+                if not provider['enabled'] or not generation:
+                    continue
+                if active.get(identifier) == generation:
+                    continue
+                saved = previous.get('selection_checks', {}).get(identifier, {})
+                done = set(saved.get('done', [])) if saved.get('generation') == generation else set()
+                for identity, core, fingerprint in required[identifier]:
+                    value = connectivity.matching_result(identity, core, fingerprint, results)
+                    if (value.get('status') in {'passed', 'failed', 'error'} and not value.get('deferred')
+                            and 0 <= now - value.get('checked_ts', 0) < config['check_seconds'] * 2):
+                        done.add(fingerprint)
+                if all(key in done for _, _, key in required[identifier]):
+                    active[identifier] = generation
+                    active_nodes[identifier] = candidates[identifier]
+                    active_statuses[identifier] = statuses[identifier]
+                else:
+                    coverage[identifier] = {'generation': generation, 'done': sorted(done)}
+            scopes = self.prepare_scopes(config, active_nodes, active_statuses)
+            needed = set().union(*required.values(), pipeline.configurations(
+                entry for nodes, _ in scopes.values() for entry in nodes))
+            if incoming is not None:
+                results = pipeline.retained_results(results, needed)
+            checked = self.log_checks(previous.get('connectivity', {}), results, changed_only=True) if incoming is not None else 0
+            generated = common.now()
+            last_check = generated if checked else previous.get('last_check')
+            publications, keys, pending = self.build_publications(scopes, results, config['check_seconds'] * 2,
+                                                                   now, generated, last_check)
+            combined = publications.pop('all')
+            batch = self.next_check_batch if next_batch is None else next_batch
+            due = self.next_check
+            if incoming is not None:
+                candidate_health = pipeline.retained_results(results, set().union(*required.values()))
+                proposed = connectivity.next_check_at(candidate_health, config['check_seconds'], batch_due=batch)
+                due = proposed if next_batch is not None or global_check else min(due, proposed)
+            elif pending or coverage:
+                due = min(due, now + 5)
+            history = previous.get('history', [])
+            if event:
+                event = {**event, 'servers': combined['total'], 'published': combined['published_total'],
+                         'fresh': sum(s['status'] == 'fresh' for s in statuses.values()),
+                         'cached': sum(s['status'] == 'cached' for s in statuses.values()), 'checked': checked}
+                history = ([event] + history)[:20]
+            snapshot = {**combined, 'providers': statuses, 'publications': publications, 'connectivity': results,
+                        'sources_key': sources_key, 'active_selections': active, 'selection_checks': coverage,
+                        'last_download': max((stamp for stamp in [previous.get('last_download'),
+                            *(status.get('fetched_at') for status in statuses.values())] if stamp), default=None),
+                        'next_refresh': self.next_refresh,
+                        'next_check_batch': batch, 'next_check': due, 'history': history}
+            with self.cache_guard, self.guard:
+                # A download may finish during validation/building. Never promote
+                # its predecessor using a late check, or overwrite concurrent metadata.
+                if (self.sources_key() != sources_key or any(self.latest_selections.get(identifier) != generation
+                        for identifier, generation in versions.items() if generation)):
+                    return False
+                # Failed downloads retain the same generation. Their new error
+                # status must survive a check which started before the failure.
+                for identifier, status in list(statuses.items()):
+                    latest = self.provider_statuses.get(identifier, {})
+                    if latest.get('_generation') and latest['_generation'] == versions.get(identifier):
+                        statuses[identifier] = {**status, **latest}
+                if event:
+                    event.update(fresh=sum(s['status'] == 'fresh' for s in statuses.values()),
+                                 cached=sum(s['status'] == 'cached' for s in statuses.values()))
+                if self.snapshot is not previous:
+                    snapshot['history'] = ([event] if event else []) + self.snapshot.get('history', [])
+                    snapshot['history'] = snapshot['history'][:20]
+                    snapshot['last_download'] = self.snapshot.get('last_download')
+                    if self.snapshot.get('last_error'):
+                        snapshot['last_error'] = self.snapshot['last_error']
+                common.atomic_write(self.snapshot_path, common.json_text(snapshot))
+                self.snapshot = snapshot
+                self.provider_statuses = statuses
+                self.published_scopes, self.publication_keys = scopes, keys
+                self.next_check_batch, self.next_check = batch, due
+                self.state_revision = secrets.token_hex(8)
+            self._clean_selections()
+            return True
+
+    def _check(self, job):
+        started, started_at = time.monotonic(), time.time()
+        identifiers = job.get('provider_ids')
+        self.logs.write('run_started', operation='connection check',
+                        provider_id=identifiers[0] if identifiers and len(identifiers) == 1 else None)
+        success, retry_delay = False, 5
+        try:
+            config = self.store.config()
+            nodes, statuses = self._collect(config)
+            captured = {identifier: status.get('_generation') for identifier, status in statuses.items()}
+            with self.cache_guard:
+                self.inflight_selections = {value for value in captured.values() if value}
+            scopes = self.prepare_scopes(config, nodes, statuses, namespace='candidate')
+            entries = [entry for nodes, _ in scopes.values() for entry in nodes]
+            names = {p['name'] for p in config['providers'] if identifiers is None or p['id'] in identifiers}
+            targets = None if identifiers is None else pipeline.configurations(e for e in entries if e.source in names)
+            def progress(done, total):
+                with self.guard:
+                    self.check_progress = {'done': done, 'total': total}
+            with self.guard:
+                previous = self.snapshot.get('connectivity', {})
+            regular = job.get('regular', False)
+            reuse = ((connectivity.BATCH_REUSE_SECONDS if regular else config['check_seconds'])
+                     if job.get('reuse_recent') else 0)
+            results = self.checker(entries, self.store.root, stop=self.stop, previous=previous,
+                                   progress=progress, targets=targets, reuse_seconds=reuse)
+            with self.guard:
+                self.check_phase = 'updating'
+                self._sync_busy()
+            event = {'at': common.now(), 'seconds': round(time.monotonic() - started, 2), 'action': 'connection check'}
+            if identifiers and len(identifiers) == 1:
+                event['provider_id'] = identifiers[0]
+            next_batch = started_at + config['check_seconds'] if regular else None
+            success = self._publish(results, captured, event=event, next_batch=next_batch,
+                                    global_check=identifiers is None)
+            if success:
+                self.logs.write('run_completed', operation='connection check', servers=self.snapshot['total'],
+                                published=self.snapshot['published_total'], seconds=event['seconds'])
+        except Exception as error:
+            retry_delay = 30
+            self._record_failure('connection check', error)
+        finally:
+            with self.guard:
+                try:
+                    current = self.jobs.items.get('check')
+                    if current and current['id'] == job['id']:
+                        if success and not self.stop.is_set():
+                            self.jobs.clear('check', job)
+                        else:
+                            retry = {**job, 'reuse_recent': True, 'regular': False} if success else job
+                            self._retry_job('check', retry, retry_delay)
+                    if not success:
+                        self.next_check = time.time() + retry_delay
+                except Exception as error:
+                    success = False
+                    self._record_failure('connection check', error)
+                    self._retry_job('check', job, 30)
+                finally:
+                    self.check_running = False
+                    self.check_phase = 'checking'
+                    self.running_check_id = None
+                    self.inflight_selections = set()
+                    self._sync_busy()
+            if success and not self.stop.is_set():
+                self._start_queued_check()
+
+    def _retry_job(self, kind, job, delay):
+        fields = {k: v for k, v in job.items() if k not in {'id', 'retry_at'}}
+        retry_at = time.time() + delay
+        try:
+            self.jobs.put(kind, **fields, retry_at=retry_at)
+        except OSError as error:
+            # The existing durable intent remains. Back off in memory too, and
+            # always release the worker's running flag when storage is full.
+            self.jobs.items[kind] = {**job, 'retry_at': retry_at}
+            self.logs.write('scheduler_failed', error=error)
+
+    def _clean_selections(self):
+        with self.cache_guard:
+            if self.refresh_running:
+                return
+            identifiers = {provider['id'] for provider in self.store.config()['providers']}
+            self.latest_selections = {key: value for key, value in self.latest_selections.items() if key in identifiers}
+            keep = (set(self.snapshot.get('active_selections', {}).values())
+                    | set(self.latest_selections.values()) | self.inflight_selections)
+            for path in self.selection_directory.glob('*.json'):
+                if path.stem not in keep:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as error:
+                        self.logs.write('cache_failed', error=error)
+            self.selection_cache = {key: value for key, value in self.selection_cache.items() if key in keep}
+
+    def refresh(self, selected=None, download=True, check=None, reuse_recent=False):
+        """Synchronous maintenance helper; HTTP jobs use the independent workers."""
+        check = download if check is None else check
+        if download:
+            with self.guard:
+                job = self.jobs.put('refresh', provider_ids=[selected] if selected else None,
+                                    provider_id=selected, reuse_recent=reuse_recent)
+                self.refresh_running, self.refresh_provider_id = True, selected
+                self._sync_busy()
+            self._download(job, autostart=False)
+        if check:
+            with self.guard:
+                regular = selected is None and (not reuse_recent or time.time() >= self.next_check_batch)
+                job = self._queue_check([selected] if selected else None, reuse_recent=reuse_recent, regular=regular)
+                self.check_running, self.check_provider_ids, self.running_check_id = True, job['provider_ids'], job['id']
+                self.check_progress = {'done': 0, 'total': 0}
+                self._sync_busy()
+            self._check(job)
+        elif not download:
+            try:
+                self._publish(event={'at': common.now(), 'seconds': 0, 'action': 'configuration updated'})
+            except Exception as error:
+                self._record_failure('refresh', error)
+            finally:
+                with self.guard:
+                    self._sync_busy()
 
     def begin_refresh(self, selected=None, *, reuse_recent=False):
         with self.guard:
-            if self.busy:
-                raise Busy("a refresh is already running")
+            if self.refresh_running or (self.busy and not self.check_running):
+                raise Busy('a provider refresh is already running')
             if selected is not None:
                 provider = next((p for p in self.store.config()['providers'] if p['id'] == selected), None)
                 if provider is None:
                     raise common.SubscriptionError('provider does not exist')
                 if not provider['enabled']:
                     raise common.SubscriptionError('provider is paused; enable it before refreshing')
-            common.atomic_write(self.job_path, common.json_text({'kind': 'refresh', 'provider_id': selected}))
-            self.job_active = True
-            self.resume_job = None
-            self.busy = True
-            self.busy_action = 'fetching'
-            self.busy_provider_id = selected
+            job = self.jobs.put('refresh', provider_ids=[selected] if selected else None,
+                                provider_id=selected, reuse_recent=reuse_recent)
+            self._start_refresh(job)
+
+    def _start_refresh(self, job):
+        self.refresh_running, self.refresh_provider_id = True, job.get('provider_id')
+        self.refresh_progress = {'done': 0, 'total': 0}
+        if not self.check_running:
             self.check_progress = {'done': 0, 'total': 0}
-            self.worker = threading.Thread(target=self.refresh, args=(selected,), kwargs={'reuse_recent': reuse_recent},
-                                           daemon=True, name="subscription-refresh")
-            self.worker.start()
+        self._sync_busy()
+        self.refresh_worker = threading.Thread(target=self._download, args=(job,), daemon=True, name='provider-refresh')
+        self.worker = self.refresh_worker
+        self.refresh_worker.start()
+
+    def _start_queued_check(self):
+        with self.guard:
+            job = self.jobs.items.get('check')
+            if (not job or self.check_running or self.stop.is_set() or job.get('retry_at', 0) > time.time()
+                    or (self.busy and not self.refresh_running)):
+                return
+            self.check_running, self.check_provider_ids, self.running_check_id = True, job.get('provider_ids'), job['id']
+            self.check_progress = {'done': 0, 'total': 0}
+            self.check_phase = 'checking'
+            self._sync_busy()
+            self.check_worker = threading.Thread(target=self._check, args=(job,), daemon=True, name='connection-check')
+            self.worker = self.check_worker
+            self.check_worker.start()
 
     def begin_check(self, *, reuse_recent=False):
         with self.guard:
-            if self.busy:
-                raise Busy('wait for the current refresh or connection check')
-            common.atomic_write(self.job_path, common.json_text({'kind': 'check', 'provider_id': None}))
-            self.job_active = True
-            self.resume_job = None
-            self.busy = True
-            self.busy_action = 'checking'
-            self.busy_provider_id = None
-            self.check_progress = {'done': 0, 'total': 0}
-            self.worker = threading.Thread(target=self.refresh, kwargs={'download': False, 'check': True, 'reuse_recent': reuse_recent},
-                                           daemon=True, name='server-check')
-            self.worker.start()
+            if self.check_running or (self.busy and not self.refresh_running):
+                raise Busy('a connection check is already running')
+            regular = not reuse_recent or time.time() >= self.next_check_batch
+            self._queue_check(reuse_recent=reuse_recent, regular=regular)
+            self._start_queued_check()
+
+    def wait_for_idle(self, timeout=60):
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.guard:
+                workers = [worker for worker in (self.refresh_worker, self.check_worker)
+                           if worker and worker is not threading.current_thread() and worker.is_alive()]
+            if not workers:
+                return
+            for worker in workers:
+                worker.join(max(0, deadline - time.monotonic()))
+            if time.monotonic() >= deadline:
+                return
 
     def publication_current(self, snapshot, sources_key=None):
         return (snapshot.get('connectivity_policy') == connectivity.POLICY_VERSION
@@ -587,6 +864,9 @@ class Manager:
             self.store.save_config(config)
             if 'refresh_seconds' in values:
                 self.next_refresh = time.time() + config['refresh_seconds']
+                snapshot = {**self.snapshot, 'next_refresh': self.next_refresh}
+                common.atomic_write(self.snapshot_path, common.json_text(snapshot))
+                self.snapshot = snapshot
             if 'check_seconds' in values:
                 self.busy = True
                 self.next_check_batch = time.time()
@@ -673,6 +953,7 @@ class Manager:
                     raise
                 self.previews.pop(values['test_token'])
                 self.snapshot.setdefault('providers', {})[provider['id']] = {'status': 'fresh'}
+                self.provider_statuses[provider['id']] = {'status': 'fresh'}
             else:
                 self.store.save_config(config)
             self.busy = True
@@ -751,27 +1032,24 @@ class Manager:
         while not self.stop.wait(2):
             self.logs.maintain()
             self.ensure_publications()
-            with self.guard:
-                due = not self.busy and time.time() >= self.next_refresh
-                check_due = not self.busy and time.time() >= self.next_check
-                resume = self.resume_job if not self.busy else None
             try:
-                if resume:
-                    selected = resume.get('provider_id')
-                    if resume['kind'] == 'refresh' and (selected is None or any(
-                            p['id'] == selected and p['enabled'] for p in self.store.config()['providers'])):
-                        self.begin_refresh(selected, reuse_recent=True)
-                    else:
-                        self.begin_check(reuse_recent=True)
-                elif due:
-                    self.begin_refresh(reuse_recent=True)
-                elif check_due:
-                    self.begin_check(reuse_recent=True)
+                with self.guard:
+                    now = time.time()
+                    if not self.refresh_running and (not self.busy or self.check_running):
+                        job = self.jobs.items.get('refresh')
+                        if job and job.get('retry_at', 0) <= now:
+                            self._start_refresh(job)
+                        elif not job and now >= self.next_refresh:
+                            self.begin_refresh(reuse_recent=True)
+                    if not self.check_running and (not self.busy or self.refresh_running):
+                        job = self.jobs.items.get('check')
+                        if now >= self.next_check and not job:
+                            self._queue_check(reuse_recent=True, regular=now >= self.next_check_batch)
+                        self._start_queued_check()
             except Busy:
                 pass
             except Exception as error:
                 self.logs.write('scheduler_failed', error=error)
-                self.stop.wait(30)
 
     def public_state(self, base_url, revision=None):
         self.ensure_publications()
@@ -780,10 +1058,14 @@ class Manager:
             config = self.store.config()
             sources_key = self.sources_key(config)
             subscriptions = self.public_subscriptions(base_url, ensure=False, sources_key=sources_key)
-            providers = [self.store.public_provider(p) | {key: value for key, value in
-                snapshot.get("providers", {}).get(p["id"], {"status": "pending", "count": 0, "protocols": {}}).items()
-                if not key.startswith('_')} for p in config["providers"]]
-            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications", "sources_key", "next_check_batch"}}
+            providers = []
+            for provider in config['providers']:
+                status = self.provider_statuses.get(provider['id'], {'status': 'pending', 'count': 0, 'protocols': {}})
+                providers.append(self.store.public_provider(provider) | {key: value for key, value in status.items()
+                    if not key.startswith('_')} | {'selection_pending': bool(provider['enabled'] and status.get('_generation')
+                        and status['_generation'] != snapshot.get('active_selections', {}).get(provider['id']))})
+            public = {k: v for k, v in snapshot.items() if k not in {"providers", "exports", "connectivity", "publications",
+                "sources_key", "next_check_batch", 'active_selections', 'selection_checks'}}
             current = self.publication_current(snapshot, sources_key)
             state_revision = self.state_revision + ':' + str(int(current))
             unchanged = revision == state_revision
@@ -803,6 +1085,10 @@ class Manager:
                 'revision': state_revision, 'unchanged': unchanged,
                 'last_error': snapshot.get('last_error'),
                 "providers": providers, "hwids": self.store.hwids(), "busy": self.busy,
+                'refresh_running': self.refresh_running, 'check_running': self.check_running,
+                'check_phase': self.check_phase if self.check_running else None,
+                'refresh_provider_id': self.refresh_provider_id, 'check_provider_ids': self.check_provider_ids,
+                'refresh_progress': dict(self.refresh_progress), 'check_queued': 'check' in self.jobs.items,
                 "refresh_seconds": config["refresh_seconds"], "next_refresh": self.next_refresh,
                 "check_seconds": config['check_seconds'], "next_check": self.next_check,
                 "busy_action": self.busy_action, "busy_provider_id": self.busy_provider_id,

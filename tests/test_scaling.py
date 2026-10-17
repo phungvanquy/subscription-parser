@@ -295,13 +295,17 @@ class ScalingWebTests(unittest.TestCase):
         with patch.object(self.manager, 'fetcher', side_effect=download), \
                 patch.object(self.manager, 'checker', side_effect=checker):
             self.manager.begin_refresh()
+            scheduler = threading.Thread(target=self.manager.scheduler)
+            scheduler.start()
             try:
                 self.assertTrue(entered.wait(2))
                 self.assertTrue(checked.wait(5), 'slow download blocked scheduled connection checks')
                 self.assertTrue(self.manager.busy)
             finally:
                 release.set()
-                self.manager.worker.join(5)
+                self.manager.wait_for_idle(5)
+                self.manager.stop.set()
+                scheduler.join(3)
         self.assertFalse(self.manager.busy)
         self.assertNotIn('last_error', self.manager.snapshot)
 
@@ -313,9 +317,9 @@ class ScalingWebTests(unittest.TestCase):
                     checker=self.manager.checker).state.manager
                 with patch.object(restarted.stop, 'wait', side_effect=[False, True]):
                     restarted.scheduler()
-                restarted.worker.join(5)
+                restarted.wait_for_idle(5)
                 self.assertFalse(restarted.busy)
-                self.assertIsNone(restarted.resume_job)
+                self.assertFalse(restarted.jobs.items)
                 self.assertFalse(restarted.job_path.exists())
                 self.assertNotIn('last_error', restarted.snapshot)
                 if kind == 'refresh' and selected != 'deleted':

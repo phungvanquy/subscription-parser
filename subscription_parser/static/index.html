@@ -39,6 +39,11 @@
       <main>
         <div class="page-heading"><div><span class="eyebrow" id="page-eyebrow">YOUR WORKSPACE</span><h1 id="page-title">Overview</h1><p id="page-description">Your providers, connection checks and subscriptions at a glance.</p></div><div class="heading-actions"><button id="refresh-button" class="button secondary"><span data-icon="refresh"></span><span class="refresh-label">Refresh all</span></button><button class="button primary" id="add-provider"><span data-icon="plus"></span>Add provider</button><button class="button primary" id="add-subscription" hidden><span data-icon="plus"></span>New subscription</button></div></div>
         <div id="global-error" class="notice warning" role="alert" hidden></div>
+        <section id="refresh-progress" class="job-progress" aria-labelledby="refresh-progress-title" hidden>
+          <div class="job-progress-heading"><strong id="refresh-progress-title" role="status"></strong><span id="refresh-progress-percent" aria-hidden="true"></span></div>
+          <p id="refresh-progress-detail"></p>
+          <div id="refresh-progress-bar" class="job-progress-track" role="progressbar" aria-labelledby="refresh-progress-title" aria-describedby="refresh-progress-detail" aria-valuemin="0" aria-valuemax="100"><span id="refresh-progress-fill"></span></div>
+        </section>
         <section id="job-progress" class="job-progress" aria-labelledby="job-progress-title" hidden>
           <div class="job-progress-heading"><strong id="job-progress-title" role="status"></strong><span id="job-progress-percent" aria-hidden="true"></span></div>
           <p id="job-progress-detail"></p>

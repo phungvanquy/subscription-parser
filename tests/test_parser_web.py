@@ -49,7 +49,7 @@ class WebTests(unittest.TestCase):
 
     def refresh(self):
         self.assertEqual(self.client.post("/api/refresh").status_code, 202)
-        self.manager.worker.join(timeout=5)
+        self.manager.wait_for_idle(timeout=5)
         self.assertFalse(self.manager.busy)
         self.assertNotIn("last_error", self.manager.snapshot)
 
@@ -407,7 +407,7 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/state').json()['providers'][0]['status'],'fresh')
         self.assertEqual(self.client.get('/api/state').json()['counts']['v2board'],0)
         self.assertEqual(self.client.post('/api/check-servers').status_code,202)
-        self.manager.worker.join(5)
+        self.manager.wait_for_idle(5)
         self.assertEqual(self.client.get('/api/state').json()['counts']['v2board'],1)
         self.assertEqual(len(self.seen),1)
 

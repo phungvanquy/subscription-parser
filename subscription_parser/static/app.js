@@ -91,16 +91,29 @@ async function loadLogs(){
 }
 $('refresh-logs').addEventListener('click',loadLogs);
 $('log-level').addEventListener('change',loadLogs);
-async function loadState(conditional=false){clearTimeout(pollTimer);try{const firstLoad=!state;const update=await api('/state'+(conditional&&state?.revision?'?revision='+encodeURIComponent(state.revision):''));state=update.unchanged?{...state,...update}:update;$('workspace').hidden=false;$('login-view').hidden=true;render(!update.unchanged);if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(()=>loadState(true),state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(()=>loadState(true),10000);}}}
+async function loadState(conditional=false){clearTimeout(pollTimer);try{const firstLoad=!state;const update=await api('/state'+(conditional&&state?.revision?'?revision='+encodeURIComponent(state.revision):''));state=update.unchanged?{...state,...update}:update;$('workspace').hidden=false;$('login-view').hidden=true;render(!update.unchanged);if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(()=>loadState(true),state.busy||state.check_queued?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(()=>loadState(true),10000);}}}
 function renderProgress(){
+  const downloading=state.refresh_running,checking=state.check_running;
+  const refreshProvider=state.providers.find(p=>p.id===state.refresh_provider_id);
+  const {done:downloaded=0,total:downloadTotal=0}=state.refresh_progress||{};
+  const downloadTitle=`Refreshing ${refreshProvider?.name||'all providers'}`;
+  const downloadDetail=downloadTotal?`${downloaded} of ${downloadTotal} providers downloaded. Selected servers are queued for connection checks.`:'Preparing provider downloads…';
+  $('refresh-progress').hidden=!(downloading&&checking);
+  if(downloading&&checking){
+    const percent=downloadTotal?Math.floor(downloaded/downloadTotal*100):0;
+    $('refresh-progress-title').textContent=downloadTitle;
+    $('refresh-progress-detail').textContent=downloadDetail;
+    $('refresh-progress-percent').textContent=`${percent}%`;
+    $('refresh-progress-bar').setAttribute('aria-valuenow',percent);
+    $('refresh-progress-fill').style.width=`${percent}%`;
+  }
   $('job-progress').hidden=!state.busy;
   if(!state.busy)return '';
-  const provider=state.providers.find(p=>p.id===state.busy_provider_id);
+  const provider=state.providers.find(p=>p.id===(checking?(state.check_provider_ids?.length===1?state.check_provider_ids[0]:null):state.busy_provider_id));
   let title='Updating subscriptions',detail='Saving results and rebuilding subscription links…',percent=null;
-  if(state.busy_action==='fetching'){
-    title=`Refreshing ${provider?.name||'all providers'}`;
-    detail='Downloading and preparing server lists…';
-  }else if(state.busy_action==='checking'){
+  if(downloading&&!checking){
+    title=downloadTitle;detail=downloadDetail;
+  }else if(checking&&state.check_phase!=='updating'){
     title=`Checking connections${provider?` · ${provider.name}`:''}`;
     const {done=0,total=0}=state.check_progress||{};
     detail=total?`${done} of ${total} client checks processed. A server can have checks for multiple clients.`:'Preparing saved servers for connection checks…';
@@ -127,10 +140,11 @@ function render(inventoryChanged=true){
   $('stat-servers').textContent=state.published_total||0;$('stat-duplicate-detail').textContent=`${state.total} nodes in library · ${state.duplicates_removed||0} duplicates combined`;
   $('stat-protocols').textContent=types.length;$('stat-protocol-detail').textContent=types.map(p=>p.toUpperCase()).join(' · ')||'Original protocols preserved';
   const working=renderProgress();
-  const downloadingAll=state.busy_action==='fetching'&&!state.busy_provider_id;
+  const downloadingAll=state.refresh_running&&!state.refresh_provider_id;
+  const exclusive=state.busy&&!state.refresh_running&&!state.check_running;
   $('stat-interval').textContent=interval(state.refresh_seconds);$('stat-next').textContent=downloadingAll?'Downloading providers…':`Next download at ${new Date(state.next_refresh*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`;
-  $('refresh-button').disabled=state.busy;$('refresh-button').classList.toggle('spinning',downloadingAll);document.querySelector('.refresh-label').textContent=downloadingAll?'Refreshing…':'Refresh all';
-  $('check-servers').disabled=state.busy||!state.total;
+  $('refresh-button').disabled=state.refresh_running||exclusive;$('refresh-button').classList.toggle('spinning',downloadingAll);document.querySelector('.refresh-label').textContent=downloadingAll?'Refreshing…':'Refresh all';
+  $('check-servers').disabled=state.check_running||exclusive||!(state.total||providers.some(p=>p.count));
   $('connection-summary').textContent=state.busy?working:`${state.published_total||0} of ${state.total} nodes included · ${Math.max(0,state.total-(state.published_total||0))} excluded · Last checked ${relative(state.last_check).toLowerCase()} · Next check at ${new Date(state.next_check*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})} · Scheduled every ${interval(state.check_seconds).toLowerCase()}. Checks use saved subscriptions; HWIDs are not sent.`;
   $('last-refresh').textContent=`Providers downloaded: ${relative(state.last_download)}`;
   $('last-refresh').title=date(state.last_download);
@@ -144,7 +158,7 @@ function render(inventoryChanged=true){
   const selected=$('protocol-filter').value;$('protocol-filter').innerHTML='<option value="">All protocols</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t.toUpperCase())}</option>`).join('');if(types.includes(selected))$('protocol-filter').value=selected;
   if(inventoryChanged){renderServers();renderIssues();}
   else document.querySelectorAll('.connection-time[data-checked-at]').forEach(el=>{el.textContent=relative(el.dataset.checkedAt);});
-  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.published??event.servers} included / ${event.servers} nodes · ${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''}${event.checked?` · ${event.checked} client checks`:''} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
+  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.action==='refresh'?`${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''} · Selected servers queued for checks`:`${event.published??event.servers} included / ${event.servers} nodes${event.checked?` · ${event.checked} client checks`:''}`} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
   renderDevices();
   if(document.activeElement!==$('refresh-interval'))$('refresh-interval').value=state.refresh_seconds;
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
@@ -163,7 +177,7 @@ function renderProviders(providerServers){
       <td class="provider-device"><span class="provider-meta-label">Device</span><span class="device-label" title="${esc(device)}">${esc(device)}</span></td>
       <td class="provider-fetch"><span class="provider-meta-label">Last fetch</span><span class="status-pill ${esc(p.status)}" title="${esc(p.error||'')}">${esc(status)}</span><span class="provider-fetch-time" title="${esc(date(p.fetched_at))}">${relative(p.fetched_at)}</span>${p.error?`<span class="provider-fetch-error" title="${esc(p.error)}">${esc(p.error)}</span>`:''}</td>
       <td class="provider-actions-cell"><details id="${esc(menuId)}" class="action-menu provider-actions" ${expanded.has(menuId)?'open':''}><summary id="provider-actions-${esc(p.id)}" aria-label="Actions for ${esc(p.name)}" title="Provider actions">${icon('more')}</summary><div class="action-menu-items">
-        <button id="provider-refresh-${esc(p.id)}" data-action="refresh" data-id="${esc(p.id)}" ${state.busy||!p.enabled?'disabled':''}>${icon('refresh')}Refresh provider</button>
+        <button id="provider-refresh-${esc(p.id)}" data-action="refresh" data-id="${esc(p.id)}" ${state.refresh_running||(state.busy&&!state.check_running)||!p.enabled?'disabled':''}>${icon('refresh')}Refresh provider</button>
         <button id="provider-edit-${esc(p.id)}" data-action="edit" data-id="${esc(p.id)}">${icon('edit')}Edit provider</button>
         <button id="provider-toggle-${esc(p.id)}" data-action="toggle" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon(p.enabled?'pause':'play')}${p.enabled?'Pause':'Enable'} provider</button>
         <button id="provider-delete-${esc(p.id)}" class="danger-text" data-action="delete" data-id="${esc(p.id)}" ${state.busy?'disabled':''}>${icon('trash')}Remove provider</button>
@@ -176,11 +190,14 @@ function providerServerCell(provider,servers,expanded){
   const working=servers.filter(n=>n.clients.length>0).length;
   const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];
   const statuses=servers.flatMap(n=>Object.values(n.connectivity||{}).map(value=>value.status));
-  const active=state.busy&&(!state.busy_provider_id||state.busy_provider_id===provider.id);
-  const note=!provider.enabled?'Paused':active&&state.busy_action==='checking'?'Checking…':active&&state.busy_action==='fetching'?'Refreshing…':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
+  const fetching=state.refresh_running&&(!state.refresh_provider_id||state.refresh_provider_id===provider.id);
+  const checking=state.check_running&&(!state.check_provider_ids||state.check_provider_ids.includes(provider.id));
+  const note=!provider.enabled?'Paused':fetching&&checking?'Refreshing and checking…':fetching?'Refreshing…':checking?'Checking…':provider.selection_pending?'New selection awaiting checks':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
+  const total=provider.selection_pending&&servers.length?servers.length:provider.count||0;
   const detailsId=`provider-clients-${provider.id}`;
-  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${provider.count||0}</span> ${provider.server_limit?'selected':'total'}</span></div>
+  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${total}</span> ${provider.selection_pending&&servers.length?'active':provider.server_limit?'selected':'total'}</span></div>
     ${provider.server_limit?`<small class="provider-sample-note">${provider.fetched_count??provider.count??0} fetched · random limit ${provider.server_limit}</small>`:''}
+    ${provider.selection_pending?`<small class="provider-sample-note">${provider.count||0} selected for next checks${servers.length?' · previous selection stays active':''}</small>`:''}
     ${note?`<small class="provider-check-note">${note}</small>`:''}
     <details id="${esc(detailsId)}" class="provider-client-details" ${expanded.has(detailsId)?'open':''}><summary id="provider-breakdown-${esc(provider.id)}">By client ${icon('chevron')}</summary><div class="provider-client-counts" role="group" aria-label="Working servers by client">${clients.map(([client,label])=>`<span>${label}<strong>${servers.filter(n=>n.clients.includes(client)).length}</strong></span>`).join('')}</div></details>`;
 }

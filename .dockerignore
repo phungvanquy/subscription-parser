@@ -14,6 +14,7 @@
 !scripts/browser_smoke.py
 !scripts/connectivity_fixture.py
 !scripts/run_tests.py
+!scripts/benchmark_scaling.py
 !tests/
 !tests/**
 **/__pycache__/

@@ -40,6 +40,33 @@ class StateImportTests(unittest.TestCase):
             self.import_source()
         self.assertEqual((self.destination / '.env').read_bytes(), before)
 
+    def test_restore_preserves_independent_jobs_and_published_selection_files(self):
+        files = {'.parser-state/jobs.json': {'check': {'id': 'saved-check', 'provider_ids': None}},
+                 '.parser-state/selections/' + 'a' * 64 + '.json': {'body': 'synthetic', 'sample_seed': 'saved-draw'}}
+        for name, value in files.items():
+            common.atomic_write(self.source / name, common.json_text(value))
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+            archive.add(self.source / '.env', arcname='.env')
+            archive.add(self.source / '.parser-state', arcname='.parser-state')
+        stream.seek(0)
+        self.assertEqual(import_archive(stream, self.destination), 6)
+        for name in files:
+            self.assertEqual((self.destination / name).read_bytes(), (self.source / name).read_bytes())
+            self.assertEqual((self.destination / name).stat().st_mode & 0o777, 0o600)
+
+    def test_large_library_snapshot_can_exceed_one_provider_response_limit(self):
+        common.atomic_write(self.source / '.parser-state/snapshot.json', common.json_text({
+            'exports': {'combined.json': 'x' * (common.MAX_BYTES + 1)}}))
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+            archive.add(self.source / '.env', arcname='.env')
+            archive.add(self.source / '.parser-state', arcname='.parser-state')
+        stream.seek(0)
+        self.assertEqual(import_archive(stream, self.destination), 4)
+        self.assertEqual((self.destination / '.parser-state/snapshot.json').read_bytes(),
+                         (self.source / '.parser-state/snapshot.json').read_bytes())
+
     def test_source_symlink_and_invalid_json_are_rejected_before_copying(self):
         path = self.source / '.parser-state/cache/source.json'
         path.unlink()

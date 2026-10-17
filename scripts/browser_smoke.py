@@ -709,14 +709,15 @@ def main():
                     release_fetch.set()
                     release_check.set()
                     release_publish.set()
-                    manager.worker.join(10)
+                    manager.wait_for_idle(10)
                     manager.fetcher = original_fetcher
                     manager.checker = original_checker
                     publishing.stop()
                 assert not manager.busy
                 assert (manager.next_refresh, manager.next_check) == schedules
                 expect(page.locator('#job-progress')).not_to_be_visible()
-                expect(page.locator('#activity-rows .activity-row').first).to_contain_text('Renamed provider refreshed')
+                expect(page.locator('#activity-rows')).to_contain_text('Renamed provider refreshed')
+                expect(page.locator('#activity-rows .activity-row').first).to_contain_text('Connections checked')
                 checks.append('live refresh/check progress follows every phase, survives navigation and reload, and fits mobile screens')
 
                 # A standalone check uses the same progress display and clears
@@ -734,18 +735,55 @@ def main():
                     assert len(seen) == before_fetch + 1
                 finally:
                     release_check.set()
-                    manager.worker.join(10)
+                    manager.wait_for_idle(10)
                     manager.checker = original_checker
                 expect(page.locator('#job-progress')).not_to_be_visible()
                 with patch.object(manager, 'checker', side_effect=RuntimeError('synthetic checker failure')):
                     page.locator('#check-servers').click()
-                    manager.worker.join(10)
-                    expect(page.locator('#global-error')).to_contain_text('refresh failed')
+                    manager.wait_for_idle(10)
+                    expect(page.locator('#global-error')).to_contain_text('connection check failed')
                     expect(page.locator('#job-progress')).not_to_be_visible()
                 checks.append('standalone connection checks show live counts and failed work clears the progress indicator')
                 manager.change_provider(provider_id=extra_provider['id'], delete=True)
                 page.evaluate('loadState()')
                 checks.append('single-provider refresh keeps other rows idle, fetches only its saved device and preserves global schedules')
+
+                # Both jobs remain visible and independently controllable.
+                fetch_started.clear(); release_fetch.clear()
+                check_started.clear(); release_check.clear(); reports.clear()
+                manager.fetcher, manager.checker = held_fetcher, held_checker
+                try:
+                    page.locator('.nav-item[data-page=servers]').click()
+                    page.locator('#check-servers').click()
+                    assert check_started.wait(5)
+                    reports[0](2, 6)
+                    expect(page.locator('#refresh-button')).to_be_enabled()
+                    page.locator('#refresh-button').click()
+                    assert fetch_started.wait(5)
+                    expect(page.locator('#refresh-progress')).to_be_visible()
+                    expect(page.locator('#refresh-progress-title')).to_have_text('Refreshing all providers')
+                    expect(page.locator('#job-progress-title')).to_have_text('Checking connections')
+                    expect(page.locator('#job-progress-detail')).to_contain_text('2 of 6 client checks processed')
+                    expect(page.locator('#refresh-button')).to_be_disabled()
+                    expect(page.locator('#check-servers')).to_be_disabled()
+                    page.reload()
+                    expect(page.locator('#refresh-progress')).to_be_visible()
+                    expect(page.locator('#job-progress')).to_be_visible()
+                    for width in (320, 390, 768, 1440):
+                        page.set_viewport_size({'width': width, 'height': 1000})
+                        assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                    release_fetch.set()
+                    manager.refresh_worker.join(10)
+                    assert not manager.refresh_running and manager.check_running
+                    expect(page.locator('#refresh-progress')).not_to_be_visible()
+                    expect(page.locator('#refresh-button')).to_be_enabled()
+                    expect(page.locator('#job-progress-title')).to_have_text('Checking connections')
+                finally:
+                    release_fetch.set(); release_check.set()
+                    manager.wait_for_idle(10)
+                    manager.fetcher, manager.checker = original_fetcher, original_checker
+                assert not manager.busy
+                checks.append('independent download and check controls, concurrent progress, reload and mobile layout')
 
                 # Advance only the synthetic authentication clock, without
                 # sleeping or touching real devices / production enrollment.

@@ -17,6 +17,16 @@ from subscription_parser import common
 from subscription_parser.storage import SCHEMA_VERSION
 
 
+def state_file_limit(path):
+    if path.name == 'snapshot.json':
+        # A snapshot contains the inventory and six rendered feeds; it can be
+        # much larger than any individual provider response at 10,000 nodes.
+        return 256 * 1024 * 1024
+    if path.parent.name in {'cache', 'selections'}:
+        return common.MAX_BYTES * 4 // 3 + 65536
+    return common.MAX_BYTES
+
+
 def import_state(source: Path, destination: Path, uid=10001, gid=10001):
     source, destination = source.resolve(), destination.resolve()
     if source == destination or source in destination.parents or destination in source.parents:
@@ -53,24 +63,25 @@ def import_state(source: Path, destination: Path, uid=10001, gid=10001):
     state = source / '.parser-state'
     if state.is_symlink():
         raise common.SubscriptionError('source state directory must not be a symlink')
-    for filename in ('providers.json', 'snapshot.json'):
+    for filename in ('providers.json', 'snapshot.json', 'jobs.json', 'job.json'):
         path = state / filename
         if path.exists() or path.is_symlink():
             if not path.is_file() or path.is_symlink():
                 raise common.SubscriptionError('saved state must contain regular files')
             try:
-                json.loads(common.read_limited(path))
+                json.loads(common.read_limited(path, state_file_limit(path)))
             except ValueError:
                 raise common.SubscriptionError('saved state contains invalid JSON') from None
             paths.append(path)
-    cache = state / 'cache'
-    if cache.is_symlink():
-        raise common.SubscriptionError('cache directory must not be a symlink')
-    if cache.is_dir():
-        for path in cache.glob('*.json'):
-            if path.is_symlink() or not path.is_file():
-                raise common.SubscriptionError('cache must contain regular files')
-            paths.append(path)
+    for name in ('cache', 'selections'):
+        cache = state / name
+        if cache.is_symlink():
+            raise common.SubscriptionError('cache directory must not be a symlink')
+        if cache.is_dir():
+            for path in cache.glob('*.json'):
+                if path.is_symlink() or not path.is_file():
+                    raise common.SubscriptionError('cache must contain regular files')
+                paths.append(path)
     archive = source / 'legacy-backup'
     if archive.is_symlink():
         raise common.SubscriptionError('legacy backup must not be a symlink')
@@ -117,16 +128,17 @@ def import_archive(stream, destination):
         with tarfile.open(fileobj=stream, mode='r|gz') as archive:
             for index, member in enumerate(archive):
                 path = Path(member.name)
-                if index >= 1000 or path.is_absolute() or '..' in path.parts or member.issym() or member.islnk():
+                if index >= 2000 or path.is_absolute() or '..' in path.parts or member.issym() or member.islnk():
                     raise common.SubscriptionError('invalid state archive member')
                 if path.as_posix() in {'app.sqlite3-wal', 'app.sqlite3-journal'} and member.size:
                     raise common.SubscriptionError('backup contains a SQLite journal; take a consistent backup first')
                 selected = path.as_posix() in {'.env', 'app.sqlite3', '.parser-state/providers.json', '.parser-state/snapshot.json',
+                                               '.parser-state/jobs.json', '.parser-state/job.json',
                                                'legacy-backup/environment.txt', 'legacy-backup/providers.json'} or (
-                    path.parent.as_posix() == '.parser-state/cache' and path.suffix == '.json')
+                    path.parent.as_posix() in {'.parser-state/cache', '.parser-state/selections'} and path.suffix == '.json')
                 if not selected:
                     continue
-                if not member.isfile() or member.size > common.MAX_BYTES:
+                if not member.isfile() or member.size > state_file_limit(path):
                     raise common.SubscriptionError('invalid or oversized state archive file')
                 size += member.size
                 if size > 512 * 1024 * 1024:

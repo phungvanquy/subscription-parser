@@ -66,11 +66,11 @@ Provider refreshes run hourly by default. Change the interval in
 **Settings → Refresh schedule**, or use **Refresh all** or a provider's refresh
 action for an immediate download.
 
-A provider's **Refresh provider** action downloads and checks only that provider's
+A provider's **Refresh provider** action downloads and queues checks only for that provider's
 servers. Other providers keep their cached responses and check timestamps, and
 their scheduled refreshes are not postponed. Identical configurations shared by
 multiple providers are checked once; each distinct native configuration keeps
-its own result. **Refresh all** downloads and checks all enabled providers.
+its own result. **Refresh all** downloads all enabled providers and queues their checks independently.
 
 A failed or invalid download can reuse the last successful response for the
 same URL, user agent, and device assignment/revision. The provider is marked
@@ -244,9 +244,10 @@ do not postpone it. Results checked in the last minute are reused at a batch
 boundary to avoid repeating a just-completed check. Unfinished work resumes
 after a short backoff, keeping the original expiry of any retained passing result.
 **Check servers** explicitly rechecks all servers without fetching providers or
-sending HWIDs. **Refresh all** downloads all enabled providers and explicitly
-rechecks them. Both start a new batch interval; a single-provider refresh keeps
-the existing global schedules. Automatic downloads between scheduled batches
+sending HWIDs, and starts a new batch interval. **Refresh all** downloads all enabled
+providers and queues a separate recheck. Downloading does not postpone scheduled
+health checks; a single-provider refresh keeps the existing global schedules.
+Automatic downloads between scheduled batches
 reuse recent results and check new, changed, or due configurations.
 Saving a tested provider or changing a subscription selection schedules checks
 only for configurations with missing, changed, or due results. Recent successful
@@ -259,12 +260,26 @@ checked** timestamps. Connection checks and feed rebuilds never advance the
 download timestamp. Dashboard status polling (15 seconds idle, 1.5 seconds while
 working) only reads state; it does not trigger downloads or connection checks.
 
-While work is running, a progress bar appears beneath the page heading on every
-workspace page. It shows the provider being refreshed, download/preparation and
-publication stages, and the processed client-check count and percentage once the
-check total is known. These counts are client checks, so one server can contribute
-more than one. Progress survives page navigation and browser reloads; the bar
-disappears when work finishes, and failures appear in the error notice.
+Downloads and checks have independent workers, schedules, retries, and progress.
+You can refresh while a check is running or check saved servers during a download.
+The dashboard shows both progress bars when they overlap. Download progress counts
+providers; check progress counts client configurations, so one server can contribute
+more than one. Progress survives navigation and reloads. Configuration edits wait
+until running work finishes.
+
+When a successful fetch draws a replacement sample, the previous selection stays
+in the feeds while the replacement is checked. Each provider switches atomically
+after its replacement has completed a first pass across compatible configurations;
+only its currently passing servers are exposed. Partial batches save their progress
+and continue after a restart without redrawing the sample. The old selection's
+results still expire normally. The two selections are never combined into an
+oversized pool. New providers can publish passing results incrementally because
+they have no previous selection to preserve. Changing a limit or request credentials
+applies immediately, without retaining an incompatible old selection.
+
+The provider row identifies a pending selection and distinguishes active servers
+from those selected for the next checks. Activity records downloads and checks
+separately, and failures appear in the error notice.
 
 For each compatible configuration, an isolated Mihomo, Xray or Hiddify process sends an
 HTTPS request through the node. The request must pass TLS verification and return
@@ -318,8 +333,9 @@ repeatedly jump ahead of untested nodes. Unfinished work resumes automatically,
 including after a restart.
 
 Provider downloads default to eight concurrent workers and a 30-second total
-deadline per provider. During a slow global refresh, cached connections continue
-to be checked. Unchanged configurations reuse parsing, validation and feed output.
+deadline per provider. The download and check queues run independently, so slow
+checks cannot prevent more providers from downloading, and a slow download cannot
+hold up scheduled checks. Unchanged configurations reuse parsing, validation and feed output.
 For thousands of servers, adjust the check interval and worker count using the
 [capacity guidance](deployment.md#environment-variables); a larger provider
 limit alone does not increase checking throughput.

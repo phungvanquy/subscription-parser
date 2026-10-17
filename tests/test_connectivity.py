@@ -235,7 +235,7 @@ class ConnectivityWebTests(unittest.TestCase):
 
     def refresh(self):
         self.assertEqual(self.client.post('/api/refresh').status_code, 202)
-        self.manager.worker.join(5)
+        self.manager.wait_for_idle(5)
         self.assertFalse(self.manager.busy)
         self.assertNotIn('last_error', self.manager.snapshot)
         return self.client.get('/api/state').json()
@@ -273,7 +273,7 @@ class ConnectivityWebTests(unittest.TestCase):
         state = self.refresh(); before = list(self.calls)
         self.mode = 'all'
         self.assertEqual(self.client.post('/api/check-servers').status_code, 202)
-        self.manager.worker.join(5)
+        self.manager.wait_for_idle(5)
         after = self.client.get('/api/state').json()
         self.assertEqual(after['counts']['mihomo'], 2)
         self.assertEqual(after['links'], state['links'])

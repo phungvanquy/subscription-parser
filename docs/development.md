@@ -77,7 +77,11 @@ results and schedules for other providers, shared native variants, changed and
 failed responses, incremental background checks, and explicit full rechecks.
 Scaling regressions also cover bounded submission, fairness after failed batches,
 download deadlines, restart recovery, publication expiry during active jobs,
-cached validation and conditional dashboard polling.
+cached validation and conditional dashboard polling. Pipeline regressions hold
+workers open to verify independent controls and download-slot refilling, reject
+late results for superseded selections, preserve old feeds during partial checks,
+resume both job kinds after restart, and preserve progress across result expiry.
+Backup tests include the immutable selection files and independent job ledger.
 Provider sampling cases cover random selection independent of order and duplicate
 rows, probe/feed limits, saved draws across rechecks and restarts, new draws on
 successful fetches, preview reuse, per-subscription scope isolation, native
@@ -177,7 +181,8 @@ exercise responsive layouts in desktop engines, not physical phones.
 | --- | --- |
 | `subscription_parser/app.py` | HTTP routes, request boundaries, and authentication integration. |
 | `subscription_parser/auth.py` | Sessions, TOTP, recovery codes, and persistent rate limits. |
-| `subscription_parser/service.py` | Provider management, scheduling, shared checks, and publication coordination. |
+| `subscription_parser/service.py` | Independent download/check workers, versioned selections, and atomic publication. |
+| `subscription_parser/pipeline.py` | Durable job intents and exact-configuration result merging. |
 | `subscription_parser/storage.py` | SQLite records and transactional schema migrations. |
 | `subscription_parser/fetch.py` | HTTPS retrieval with explicit device assignments. |
 | `subscription_parser/protocols.py` | Input parsing and client-format adapters. |

@@ -369,10 +369,10 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
 .job-progress { margin-bottom: 24px; padding: 18px 20px; border: 1px solid #cbded2; border-radius: var(--radius); background: #f0f7f2; }
 .job-progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .job-progress-heading strong { min-width: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-#job-progress-percent { flex-shrink: 0; color: var(--green); font-size: 12px; font-variant-numeric: tabular-nums; }
-#job-progress-detail { margin: 7px 0 12px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+#job-progress-percent, #refresh-progress-percent { flex-shrink: 0; color: var(--green); font-size: 12px; font-variant-numeric: tabular-nums; }
+#job-progress-detail, #refresh-progress-detail { margin: 7px 0 12px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .job-progress-track { height: 6px; border-radius: 4px; background: #dce9e0; overflow: hidden; }
-#job-progress-fill { display: block; height: 100%; background: var(--green); border-radius: inherit; }
+#job-progress-fill, #refresh-progress-fill { display: block; height: 100%; background: var(--green); border-radius: inherit; }
 .job-progress-track.indeterminate #job-progress-fill { width: 35%; animation: job-progress-slide 1.6s ease-in-out infinite alternate; }
 @keyframes job-progress-slide { from { transform: translateX(0); } to { transform: translateX(186%); } }
 

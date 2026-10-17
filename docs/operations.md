@@ -96,7 +96,8 @@ docker compose up -d --no-build --wait
 docker compose exec app python -m subscription_parser.manage check
 ```
 
-The importer restores SQLite, provider caches, published snapshots, and legacy
+The importer restores SQLite, provider caches, published snapshots, saved job intents,
+immutable selections (including a previously published sample), and legacy
 migration files. It skips the old process-lock file and debug logs; the full copy
 in the backup retains logs for inspection. It validates the database, rejects
 unfinished SQLite journals and unsafe archive paths, and applies private file
@@ -193,3 +194,20 @@ Credentials, provider payloads, and raw client-core output are excluded.
 For a bug report, include the source commit, core version, action taken, and a
 sanitized error description. Keep subscription URLs, HWIDs, keys, QR codes,
 recovery codes, and exported proxy credentials out of public reports.
+
+### Independent download and check recovery
+
+The application still uses one container and one process lock. Downloads and
+connection checks have separate worker threads and bounded pools. `.parser-state/jobs.json`
+saves both job intents; completed provider downloads are removed from the refresh
+queue. Restarting resumes unfinished downloads and checks independently. Legacy
+`job.json` intents are imported automatically.
+
+`.parser-state/selections/` holds immutable responses and saved random draws used
+by active, candidate, or in-flight selections. `snapshot.json` atomically records
+which selections are published, check results, and replacement-check progress.
+Keep these files together in backups; the importer restores them. Superseded
+selection files are removed once no worker or publication needs them. Schema 7
+and existing provider settings, credentials, HWIDs, and subscription links remain
+unchanged. To roll back to an image without this pipeline, restore its matching
+pre-upgrade backup as well as the image so its cached list matches its snapshot.
