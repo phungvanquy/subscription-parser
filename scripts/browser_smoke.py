@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise the dashboard with synthetic providers; never change live accounts."""
 from contextlib import contextmanager, suppress
+import copy
 import json
 import os
 from pathlib import Path
@@ -216,7 +217,10 @@ def main():
                 page.locator('#page-title').click()
                 expect(first_row.locator('.action-menu-items')).not_to_be_visible()
                 checks.append('provider details and actions stay usable through polling, keyboard navigation and outside clicks')
-                valid_until = manager.snapshot['valid_until']
+                saved_connectivity = copy.deepcopy(manager.snapshot['connectivity'])
+                for cores in manager.snapshot['connectivity'].values():
+                    for result in cores.values():
+                        result['checked_ts'] = time.time() - 1201
                 manager.snapshot['valid_until'] = time.time() - 1
                 page.reload()
                 expect(page.locator('#provider-rows tr')).to_have_count(2)
@@ -225,7 +229,8 @@ def main():
                     expect(row.locator('.server-count')).to_have_text('2')
                     expect(row.locator('.provider-client-counts strong')).to_have_text(['0'] * 5)
                     expect(row.locator('.provider-check-note')).to_have_text('Checks expired')
-                manager.snapshot['valid_until'] = valid_until
+                manager.snapshot['connectivity'] = saved_connectivity
+                manager.refresh(download=False, check=False)
                 page.reload()
                 expect(page.locator('#provider-rows tr').first.locator('.provider-working')).to_have_text('2 working')
                 page.locator('.nav-item[data-page=providers]').click()

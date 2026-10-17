@@ -44,10 +44,10 @@ def atomic_write(path: Path, content: str) -> None:
             os.unlink(temporary)
 
 
-def read_limited(path: Path) -> bytes:
+def read_limited(path: Path, limit=MAX_BYTES) -> bytes:
     with path.open("rb") as source:
-        data = source.read(MAX_BYTES + 1)
-    if len(data) > MAX_BYTES:
+        data = source.read(limit + 1)
+    if len(data) > limit:
         raise SubscriptionError("subscription exceeds the 12 MiB limit")
     return data
 

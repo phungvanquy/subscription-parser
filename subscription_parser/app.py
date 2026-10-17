@@ -17,9 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import common, publication
-from .config import admin_key
+from .config import MAX_PROVIDERS, admin_key
 from .auth import Auth, AuthError, SESSION_SECONDS
-from .fetch import fetch_subscription
+from .fetch import bounded_fetch_subscription
 from .service import Manager, Busy
 
 STATIC = Path(__file__).with_name("static")
@@ -59,7 +59,7 @@ class DeviceName(BaseModel):
 class DeviceReplacement(BaseModel):
     value: str = Field(min_length=10, max_length=64)
     revision: int = Field(ge=1)
-    provider_ids: list[str] = Field(max_length=50)
+    provider_ids: list[str] = Field(max_length=MAX_PROVIDERS)
     confirmed: bool = False
 
 
@@ -71,10 +71,10 @@ class Settings(BaseModel):
 class Subscription(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     all_providers: bool = False
-    provider_ids: list[str] = Field(default_factory=list, max_length=50)
+    provider_ids: list[str] = Field(default_factory=list, max_length=MAX_PROVIDERS)
 
 
-def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, checker=None):
+def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscription, checker=None):
     # Read once: recreating the container applies a changed deployment key.
     admin_token = admin_key()
     root = Path(root or os.environ.get('PARSER_DATA_DIR') or Path(__file__).resolve().parent.parent)
@@ -234,8 +234,8 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
         return session_response(request, data, cookie)
 
     @app.get("/api/state", dependencies=[Depends(admin)])
-    def state(request: Request):
-        return manager.public_state(public_url or str(request.base_url))
+    def state(request: Request, revision: str | None = None):
+        return manager.public_state(public_url or str(request.base_url), revision)
 
     @app.get('/api/logs', dependencies=[Depends(admin)])
     def logs(level: Literal['all', 'warning', 'error'] = 'all'):
@@ -330,6 +330,9 @@ def create_app(root=None, start_scheduler=True, fetcher=fetch_subscription, chec
 
     @app.get("/sub/{token}/{filename}")
     def subscription(token: str, filename: str):
+        if filename not in publication.FILES or manager.store.subscription_for_token(token) is None:
+            raise HTTPException(404, 'subscription not found')
+        manager.ensure_publications()
         with manager.guard:
             selected = manager.store.subscription_for_token(token)
             if selected is None or filename not in publication.FILES:

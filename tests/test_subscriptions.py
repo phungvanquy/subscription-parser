@@ -534,11 +534,14 @@ class SubscriptionTests(unittest.TestCase):
         self.assert_feeds(groups[identifier], {'shared.example'}, {'Alpha'})
         self.assert_feeds(groups['default'], {'Beta.example', 'shared.example'}, {'Beta'})
         key = publication.scope_key(groups[identifier])
+        shared = next(node for node in self.manager.published_scopes[key][0] if node.name == 'Shared')
+        for value in self.manager.snapshot['connectivity'][shared.identity].values():
+            value['checked_ts'] = time.time() - 1201
         self.manager.snapshot['publications'][key]['valid_until'] = time.time() - 1
         expired = self.groups()[identifier]
         self.assertEqual(expired['published_total'], 0)
-        for link in expired['links'].values():
-            self.assertEqual(self.client.get(link).status_code, 503)
+        for name, link in expired['links'].items():
+            self.assertEqual(self.client.get(link).status_code, 200 if name == 'combined.json' else 503)
         self.assertEqual(self.client.get(groups['default']['links']['xray.json']).status_code, 200)
 
     def test_admin_auth_validation_and_busy_changes(self):

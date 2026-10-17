@@ -91,7 +91,7 @@ async function loadLogs(){
 }
 $('refresh-logs').addEventListener('click',loadLogs);
 $('log-level').addEventListener('change',loadLogs);
-async function loadState(){clearTimeout(pollTimer);try{const firstLoad=!state;state=await api('/state');$('workspace').hidden=false;$('login-view').hidden=true;render();if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(loadState,state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(loadState,10000);}}}
+async function loadState(conditional=false){clearTimeout(pollTimer);try{const firstLoad=!state;const update=await api('/state'+(conditional&&state?.revision?'?revision='+encodeURIComponent(state.revision):''));state=update.unchanged?{...state,...update}:update;$('workspace').hidden=false;$('login-view').hidden=true;render(!update.unchanged);if(firstLoad){selectPage(page);if(page!=='settings')loadSecurity();}pollTimer=setTimeout(()=>loadState(true),state.busy?1500:15000);}catch(error){if(state){$('global-error').textContent=error.message;$('global-error').hidden=false;pollTimer=setTimeout(()=>loadState(true),10000);}}}
 function renderProgress(){
   $('job-progress').hidden=!state.busy;
   if(!state.busy)return '';
@@ -118,7 +118,7 @@ function renderProgress(){
   $('job-progress-fill').style.width=percent===null?'':`${percent}%`;
   return `${title} · ${detail}`;
 }
-function render(){
+function render(inventoryChanged=true){
   const providers=state.providers,inventory=state.inventory||[],types=[...new Set(inventory.map(n=>n.protocol))].sort();
   const providerServers=new Map(providers.map(p=>[p.name,[]]));
   inventory.forEach(n=>n.sources.forEach(source=>providerServers.get(source)?.push(n)));
@@ -142,7 +142,8 @@ function render(){
   renderSubscriptions();
   const selectedProvider=$('provider-filter').value;$('provider-filter').innerHTML='<option value="">All providers</option>'+providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');if(providers.some(p=>p.id===selectedProvider))$('provider-filter').value=selectedProvider;
   const selected=$('protocol-filter').value;$('protocol-filter').innerHTML='<option value="">All protocols</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t.toUpperCase())}</option>`).join('');if(types.includes(selected))$('protocol-filter').value=selected;
-  renderServers();renderIssues();
+  if(inventoryChanged){renderServers();renderIssues();}
+  else document.querySelectorAll('.connection-time[data-checked-at]').forEach(el=>{el.textContent=relative(el.dataset.checkedAt);});
   $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.published??event.servers} included / ${event.servers} nodes · ${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''}${event.checked?` · ${event.checked} client checks`:''} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
   renderDevices();
   if(document.activeElement!==$('refresh-interval'))$('refresh-interval').value=state.refresh_seconds;
@@ -308,7 +309,7 @@ $('delete-subscription').addEventListener('click',async()=>{
 function connectionCell(value){
   const status=value?.status||'pending',label={passed:'Passed',failed:'Failed',unsupported:'Unsupported',error:'Check error',pending:'Pending',stale:'Expired'}[status]||status;
   const color=status==='passed'?'fresh':status==='failed'?'unavailable':status==='error'?'cached':'pending';
-  return `<span class="status-pill ${color}" title="${esc(value?.reason||'HTTPS request passed')}">${esc(label)}${status==='passed'?` · ${esc(value.latency_ms)} ms`:''}</span><small class="connection-time" title="${esc(value?.checked_at||'')}">${esc(value?.reason||relative(value?.checked_at))}</small>`;
+  return `<span class="status-pill ${color}" title="${esc(value?.reason||'HTTPS request passed')}">${esc(label)}${status==='passed'?` · ${esc(value.latency_ms)} ms`:''}</span><small class="connection-time" ${!value?.reason&&value?.checked_at?`data-checked-at="${esc(value.checked_at)}"`:''} title="${esc(value?.checked_at||'')}">${esc(value?.reason||relative(value?.checked_at))}</small>`;
 }
 function renderServers(){
   if(!state)return;
@@ -350,7 +351,7 @@ function rebuildAssignments(){
 function providerRequests(){
   const id=$('provider-id').value,urls=providerURLs(),prefix=$('provider-name').value.trim();
   if(id&&urls.length>1)throw new Error('Use one subscription URL when editing a provider.');
-  if(urls.length>50)throw new Error('Add at most 50 subscriptions.');
+  if(urls.length>50)throw new Error('Add at most 50 providers at a time.');
   if(!id&&!urls.length)throw new Error('Enter a subscription link.');
   if(new Set(urls).size!==urls.length)throw new Error('Remove duplicate links from this import.');
   return (urls.length?urls:['']).map((url,index)=>{

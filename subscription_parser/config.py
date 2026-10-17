@@ -3,6 +3,21 @@ import os
 
 from .common import SubscriptionError
 
+MAX_PROVIDERS = 200
+
+
+def env_int(name, default, minimum, maximum):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        number = int(value)
+        if minimum <= number <= maximum:
+            return number
+    except ValueError:
+        pass
+    raise SubscriptionError(f'{name} must be an integer between {minimum} and {maximum}')
+
 
 def admin_key():
     value = os.environ.get('PARSER_ADMIN_TOKEN', '')

@@ -43,6 +43,7 @@ COPY --chown=10001:10001 scripts/install_client_cores.py scripts/client-cores.lo
 COPY --chown=10001:10001 scripts/browser_smoke.py ./scripts/browser_smoke.py
 COPY --chown=10001:10001 scripts/connectivity_fixture.py ./scripts/connectivity_fixture.py
 COPY --chown=10001:10001 scripts/run_tests.py ./scripts/run_tests.py
+COPY --chown=10001:10001 scripts/benchmark_scaling.py ./scripts/benchmark_scaling.py
 USER parser
 
 FROM development AS browser-tests

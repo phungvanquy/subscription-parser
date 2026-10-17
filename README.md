@@ -11,7 +11,7 @@ or more providers and has its own stable import links.
 
 ## Features
 
-- **Multiple providers and subscriptions.** Manage up to 50 providers and any
+- **Multiple providers and subscriptions.** Manage up to 200 providers and any
   number of named output subscriptions, with independent provider selections.
 - **Protocol-aware conversion.** Import JSON, YAML, and plain or base64 share
   links. Preserve supported protocols, credentials, and transport settings.

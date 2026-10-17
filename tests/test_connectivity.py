@@ -87,14 +87,15 @@ class ConnectivityTests(unittest.TestCase):
         self.assertTrue(all(v['status'] == 'pending' for row in values.values() for v in row.values()))
         self.assertFalse(c.filtered_entries(self.nodes, values, 1200)[0].outputs)
 
-    def test_deferred_jobs_keep_only_matching_passes_without_extending_their_expiry(self):
+    def test_deferred_jobs_keep_matching_results_without_extending_their_expiry(self):
         previous = self.records()
         with patch.object(c, 'BATCH_TIMEOUT', 0):
             values = c.check_entries(self.nodes, self.root, previous=previous,
                                     tester=lambda *args: self.fail('must not probe'))
         self.assertEqual(values[self.nodes[0].identity],
                          {core: {**value, 'deferred': True} for core, value in previous[self.nodes[0].identity].items()})
-        self.assertTrue(all(v['status'] == 'pending' for v in values[self.nodes[1].identity].values()))
+        self.assertEqual(values[self.nodes[1].identity],
+                         {core: {**value, 'deferred': True} for core, value in previous[self.nodes[1].identity].items()})
         future = max(v['checked_ts'] for v in values[self.nodes[0].identity].values()) + 1201
         self.assertFalse(c.filtered_entries(self.nodes, values, 1200, now=future)[0].outputs)
         changed = copy.deepcopy(self.nodes[0])
@@ -178,7 +179,8 @@ class ConnectivityTests(unittest.TestCase):
         with patch.object(c, 'BATCH_TIMEOUT', 0):
             values = c.check_entries([second, first], self.root, previous=previous)
         self.assertEqual(c.current_result(first, 'xray', values, 1200)['status'], 'passed')
-        self.assertEqual(c.current_result(second, 'xray', values, 1200)['status'], 'pending')
+        self.assertEqual(c.current_result(second, 'xray', values, 1200)['status'], 'failed')
+        self.assertTrue(c.current_result(second, 'xray', values, 1200)['deferred'])
 
     def test_next_check_uses_shared_deadline_and_backs_off_unfinished_work(self):
         results = {'one': {'xray': {'status': 'passed', 'checked_ts': 100},
@@ -279,9 +281,17 @@ class ConnectivityWebTests(unittest.TestCase):
 
     def test_expired_and_legacy_snapshots_cannot_serve_old_nodes(self):
         state = self.refresh()
+        for cores in self.manager.snapshot['connectivity'].values():
+            for record in cores.values():
+                record['checked_ts'] = time.time() - 1201
         self.manager.snapshot['valid_until'] = time.time() - 1
-        for link in state['links'].values():
-            self.assertEqual(self.client.get(link).status_code, 503)
+        for name, link in state['links'].items():
+            response = self.client.get(link)
+            if name == 'combined.json':
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()['servers'], [])
+            else:
+                self.assertEqual(response.status_code, 503)
         expired = self.client.get('/api/state').json()
         self.assertEqual(expired['published_total'], 0)
         self.assertFalse(any(node['clients'] for node in expired['inventory']))

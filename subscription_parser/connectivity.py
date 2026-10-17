@@ -1,7 +1,7 @@
 """Bounded HTTPS checks through each isolated client core."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 import copy
 import hashlib
 import http.client
@@ -21,13 +21,14 @@ from urllib.parse import urlsplit
 import yaml
 
 from . import common, protocols
+from .config import env_int
 
 CORES = ('mihomo', 'xray', 'hiddify')
 URLS = ('https://www.gstatic.com/generate_204', 'https://cp.cloudflare.com/generate_204')
 REQUEST_TIMEOUT = 8
 START_TIMEOUT = 5
-BATCH_TIMEOUT = 300
-WORKERS = 4
+BATCH_TIMEOUT = 60
+WORKERS = 8
 POLICY_VERSION = 2
 # Avoid repeating a just-completed manual/provider check at a batch boundary.
 BATCH_REUSE_SECONDS = 60
@@ -174,7 +175,7 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
             ready_by = min(deadline, time.monotonic() + START_TIMEOUT)
             while True:
                 if stop.is_set() or time.monotonic() >= deadline:
-                    return result('error', 'Check interrupted; retry scheduled')
+                    return result('pending', 'Check interrupted; retry scheduled')
                 if process.poll() is not None:
                     return result('error', 'Client core could not start this configuration')
                 try:
@@ -187,7 +188,7 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
             attempts = 0
             for url in urls:
                 if stop.is_set() or time.monotonic() >= deadline:
-                    return result('error', 'Check interrupted; retry scheduled', attempts=attempts)
+                    return result('pending', 'Check interrupted; retry scheduled', attempts=attempts)
                 attempts += 1
                 # A child bounds the entire CONNECT/TLS/HTTP exchange, including
                 # peers that trickle bytes indefinitely. Never print core logs.
@@ -203,6 +204,8 @@ def probe(entry, target, root, stop, deadline, urls=URLS):
                                       endpoint=urlsplit(url).hostname)
                 except (subprocess.TimeoutExpired, ValueError):
                     pass
+                if stop.is_set() or time.monotonic() >= deadline:
+                    return result('pending', 'Check interrupted; retry scheduled', attempts=attempts)
                 if process.poll() is not None:
                     return result('error', 'Client core stopped during the check', attempts=attempts)
             return result('failed', 'HTTPS request failed or returned an unexpected response on both endpoints',
@@ -233,9 +236,21 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
                   targets=None, reuse_seconds=0):
     stop = stop or threading.Event()
     previous = previous or {}
-    records, jobs, seen = {}, [], set()
+    records, jobs, seen, visited = {}, [], set(), set()
     evaluated_at = time.time()
+    workers = env_int('PARSER_CHECK_WORKERS', WORKERS, 1, 128)
+    budget = env_int('PARSER_CHECK_BATCH_SECONDS', BATCH_TIMEOUT, 1, 300)
+    def deferred(cached, key):
+        if (cached.get('status') in {'passed', 'failed', 'error'} and cached.get('fingerprint') == key
+                and 0 < cached.get('checked_ts', 0) <= evaluated_at):
+            # Keep failures' scheduling history too, or they jump ahead of
+            # never-checked nodes every time a regular batch is interrupted.
+            return {**cached, 'deferred': True}
+        return result('pending', 'Batch time limit reached; retry scheduled', fingerprint=key)
     for entry in [*unique_entries(entries), *entries]:
+        if id(entry) in visited:
+            continue
+        visited.add(id(entry))
         records.setdefault(entry.identity, {})
         for core in CORES:
             if core not in entry.outputs:
@@ -256,36 +271,47 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
                        and evaluated_at - cached['checked_ts'] < reuse_seconds)
             selected = targets is None or (entry.identity, core, key) in targets
             records.setdefault(record_id, {})[core] = (
-                dict(cached) if cached and (not selected or current) else result('pending', fingerprint=key))
+                dict(cached) if cached and (not selected or current) else deferred(cached, key))
             if selected and not current:
                 jobs.append((entry, core, key, record_id, cached))
     # Oldest/never-checked nodes go first so large lists cannot starve at the tail.
     jobs.sort(key=lambda job: job[4].get('checked_ts', 0))
-    deadline = time.monotonic() + BATCH_TIMEOUT
+    deadline = time.monotonic() + budget
     def run(job):
         entry, core, key, record_id, cached = job
         if stop.is_set() or time.monotonic() >= deadline:
-            if (cached.get('status') == 'passed' and cached.get('fingerprint') == key
-                    and 0 < cached.get('checked_ts', 0) <= time.time()):
-                # Keep the original timestamp: publication still expires this
-                # result normally. A deferred job must not erase a valid check
-                # or make it appear to have just been tested.
-                return {**cached, 'deferred': True}
-            return result('pending', 'Batch time limit reached; retry scheduled', fingerprint=key)
+            return deferred(cached, key)
         try:
             value = tester(entry, core, root, stop, deadline)
         except Exception:
             value = result('error', 'Connection checker failed; retry scheduled')
+        if value['status'] == 'pending':
+            return deferred(cached, key)
         return {**value, 'fingerprint': key, 'checked_at': common.now(), 'checked_ts': time.time()}
     if progress:
         progress(0, len(jobs))
-    with ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix='connection-check') as pool:
-        futures = {pool.submit(run, job): job for job in jobs}
-        for done, future in enumerate(as_completed(futures), 1):
-            _, core, _, record_id, _ = futures[future]
-            records[record_id][core] = future.result()
-            if progress:
-                progress(done, len(jobs))
+    # Only active checks own futures. The rest remain durable pending/deferred
+    # records, saved by the manager and resumed after a batch or restart.
+    queued = iter(jobs)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='connection-check') as pool:
+        active = {}
+        def fill():
+            while len(active) < workers and not stop.is_set() and time.monotonic() < deadline:
+                job = next(queued, None)
+                if job is None:
+                    break
+                active[pool.submit(run, job)] = job
+        fill()
+        while active:
+            finished, _ = wait(active, return_when=FIRST_COMPLETED)
+            for future in finished:
+                _, core, _, record_id, _ = active.pop(future)
+                records[record_id][core] = future.result()
+                completed += 1
+                if progress:
+                    progress(completed, len(jobs))
+            fill()
     return records
 
 

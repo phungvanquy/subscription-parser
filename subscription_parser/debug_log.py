@@ -47,7 +47,7 @@ EVENTS = {
     'auth_reset': ('warning', 'Two-factor authentication reset by local server administrator'),
 }
 CHOICES = {
-    'operation': {'refresh', 'connection check', 'configuration update', 'provider test'},
+    'operation': {'refresh', 'connection check', 'configuration update', 'provider test', 'publication expiry'},
     'stage': {'fetch', 'parse', 'validate', 'check', 'publish', 'schedule'},
     'core': {'mihomo', 'xray', 'hiddify'},
 }
@@ -56,6 +56,8 @@ REASONS = {
     'provider rejected the device ID header',
     'device limit reached; reuse an authorized HWID or free a device slot',
     'subscription download failed (network, timeout or TLS error)',
+    'subscription download exceeded its total time limit',
+    'subscription download worker failed',
     'subscription exceeds the 12 MiB limit',
     'provider response has no client-accepted servers',
     'no compatible servers were returned; check the subscription and device ID',

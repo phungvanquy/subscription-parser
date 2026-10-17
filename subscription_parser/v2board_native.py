@@ -108,10 +108,13 @@ def export(entries, results, max_age, evaluated_at, generated_at, valid_until):
     document = {'format': FORMAT, 'schema_version': SCHEMA_VERSION, 'generated_at': generated_at,
                 'valid_until': int(valid_until), 'nodes': []}
     identities, diagnostics = set(), []
+    size = len((json.dumps(document, ensure_ascii=False, separators=(',', ':')) + '\n').encode())
     for entry in connectivity.unique_entries(entries):
         try:
             if not entry.outputs:
                 continue
+            if len(document['nodes']) >= v2board.MAX_NODES:
+                raise common.SubscriptionError('native feed reached its 500-node limit')
             host, port = _endpoint(entry)
             v2board.endpoint(host, port)
             configs, notes, rejected = {}, list(entry.notes), []
@@ -138,15 +141,14 @@ def export(entries, results, max_age, evaluated_at, generated_at, valid_until):
             if not configs and 'uri' not in node:
                 raise common.SubscriptionError('no supported native configuration or portable URI'
                                                + (': ' + '; '.join(rejected) if rejected else ''))
-            if len(json.dumps(node, ensure_ascii=False, separators=(',', ':')).encode()) > MAX_NODE_BYTES:
+            node_size = len(json.dumps(node, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode())
+            if node_size > MAX_NODE_BYTES:
                 raise common.SubscriptionError('native node exceeds the 64 KiB limit')
-            if len(document['nodes']) >= v2board.MAX_NODES:
-                raise common.SubscriptionError('native feed reached its 500-node limit')
-            document['nodes'].append(node)
-            body = json.dumps(document, ensure_ascii=False, separators=(',', ':'), allow_nan=False) + '\n'
-            if len(body.encode()) > v2board.MAX_BYTES:
-                document['nodes'].pop()
+            addition = node_size + bool(document['nodes'])
+            if size + addition > v2board.MAX_BYTES:
                 raise common.SubscriptionError('native feed reached its 1 MiB limit')
+            document['nodes'].append(node)
+            size += addition
             identities.add(entry.identity[:16])
         except (common.SubscriptionError, ValueError, KeyError, TypeError, IndexError) as exc:
             diagnostics.append({'source': entry.source, 'name': entry.name, 'client': 'v2board',

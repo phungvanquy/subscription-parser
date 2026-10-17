@@ -18,7 +18,8 @@ selection of providers with its own client import links.
 
 You can paste multiple links, one per line, and assign a device to each link.
 A saved HWID is never preselected automatically. The application supports up to
-**50 providers**. Provider names must be unique.
+**200 providers**. Provider names must be unique.
+Bulk entry accepts up to 50 providers at a time; repeat it to add larger libraries.
 
 Changing a provider's URL, device assignment, or user agent in the dashboard
 requires another fetch test. A name-only edit does not. Fetch tests validate
@@ -260,10 +261,12 @@ The dashboard shows a separate result for each core. A passing Xray result does
 not make a failing Hiddify variant eligible for publication.
 
 Results expire after **twice the configured check interval**. Changes to a
-configuration or its dependencies invalidate its previous result. A feed returns
-HTTP 503 when publication is pending or stale; client-specific feeds also return
-503 when they have no passing compatible nodes. Failed nodes remain in the
-inventory and can return to feeds after a later successful check.
+configuration or its dependencies invalidate its previous result. Expired nodes
+are removed from feeds even during an ongoing refresh or check; other nodes with
+current passing results remain available. A client-specific feed returns HTTP 503
+when it has no passing compatible nodes. The combined archive can describe an empty
+library. Unpublished, incompatible or invalidated snapshots remain unavailable.
+Failed nodes remain in the inventory and can return after a later successful check.
 
 ### Understand counts and resource use
 
@@ -278,12 +281,21 @@ adding those counts together double-counts nodes. Subscription detail counts
 apply to the selected providers. Overview and Server library describe the whole
 workspace.
 
-The checker runs up to **four concurrent checks**, with a **five-second core
-startup limit**, **eight seconds per HTTPS attempt**, and a **five-minute batch
-limit**. Exact configurations are checked once per run; distinct native variants
-may require separate checks. Untested nodes are excluded and prioritized on the
-next run. Resource use depends on the node list and cores; increasing the check
-interval reduces how often this work occurs.
+The checker defaults to **eight concurrent checks**, with a **five-second core
+startup limit**, **eight seconds per HTTPS attempt**, and a **one-minute batch
+budget**. Concurrency and batch duration are configurable in the deployment
+environment. Exact configurations share results across subscriptions; distinct
+native variants may require separate checks. Untested nodes are excluded and
+prioritized on the next run. Deferred failures retain their age so they cannot
+repeatedly jump ahead of untested nodes. Unfinished work resumes automatically,
+including after a restart.
+
+Provider downloads default to eight concurrent workers and a 30-second total
+deadline per provider. During a slow global refresh, cached connections continue
+to be checked. Unchanged configurations reuse parsing, validation and feed output.
+For thousands of servers, adjust the check interval and worker count using the
+[capacity guidance](deployment.md#environment-variables); a larger provider
+limit alone does not increase checking throughput.
 
 Results measure connectivity from the Docker server at the recorded time.
 Reported latency is an HTTPS request measurement, not an ICMP ping or speed test.

@@ -75,6 +75,20 @@ unexpected HTTP responses, and process cleanup.
 Refresh regression cases verify single-provider downloads/checks, preserved
 results and schedules for other providers, shared native variants, changed and
 failed responses, incremental background checks, and explicit full rechecks.
+Scaling regressions also cover bounded submission, fairness after failed batches,
+download deadlines, restart recovery, publication expiry during active jobs,
+cached validation and conditional dashboard polling.
+
+Measure application overhead with an isolated synthetic library:
+
+```sh
+docker compose -f compose.yaml -f compose.dev.yaml exec app \
+  python scripts/benchmark_scaling.py --providers 50 --nodes 10000
+```
+
+The benchmark uses temporary storage and mocks provider requests, core validation
+and connection probes. It reports initial and cached-run duration, state payload
+size and peak memory; it does not measure live provider latency or core throughput.
 
 ### Production-container checks
 

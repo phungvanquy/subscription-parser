@@ -64,7 +64,7 @@ def main():
         while time.monotonic() < deadline:
             state = api('/api/state')
             if not state['busy'] and state['counts'].get('v2board') == 1:
-                assert 'last_error' not in state
+                assert not state.get('last_error')
                 return state
             time.sleep(0.5)
         raise RuntimeError('synthetic cached provider did not refresh')

@@ -116,6 +116,18 @@ Poll `/api/state` for `busy`, `busy_action`, `busy_provider_id`, and `check_prog
 a job. A queued request is not a completed check. Changes that conflict with a
 running job return HTTP 409.
 
+For subsequent polls, send the previous `revision` as `/api/state?revision=<revision>`.
+When `unchanged` is true, `inventory` and `diagnostics` are omitted; retain those two
+fields from the previous response and replace the remaining fields, including job
+progress. A different revision returns the complete state. The bundled dashboard
+uses this to avoid transferring and rendering the full library on every progress
+poll. `last_error` is null when there is no current job error.
+
+Accepted jobs are recorded before HTTP 202 is returned and resume after a restart.
+Unfinished connection checks retain their timestamps and are saved between bounded
+batches. Progress counts checks processed in the current batch; reaching its time
+budget can leave work for an automatic continuation.
+
 `last_download` is the latest successful provider download; `last_check` records
 the latest job that actually checked connections. `generated_at` records a feed
 rebuild and must not be displayed as a download time. `next_check` is the next
@@ -151,7 +163,7 @@ Test a new provider with:
 Use a saved device ID from `/api/state` in `hwid_id`, or explicitly use `null`
 to omit the HWID header. On creation the field must be present; a blank string
 is invalid. Names are required, unique, and limited to 80 characters. URLs must
-be HTTPS without embedded HTTP login credentials. There is a 50-provider limit.
+be HTTPS without embedded HTTP login credentials. There is a 200-provider limit.
 
 To save a tested provider, send the same fields to `/api/providers` with the
 returned `test_token`. Tokens are single-use, expire after ten minutes, and bind

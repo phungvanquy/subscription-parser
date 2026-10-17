@@ -699,7 +699,9 @@ def dependencies(outbound, target):
 def bundle(entry, target, name):
     root = copy.deepcopy(entry.outputs[target])
     key = "name" if target == "mihomo" else "tag"
-    lookup = {o.get(key): o for o in entry.context}
+    # Most nodes have no dependencies. Avoid rescanning a provider's entire
+    # native configuration for every conversion, fingerprint and probe.
+    lookup = {o.get(key): o for o in entry.context} if dependencies(root, target) else {}
     result, active, done = [], set(), {}
     def visit(node, label, depth=0):
         if depth > 20 or label in active:

@@ -67,6 +67,10 @@ The app never rewrites this file.
 | `PARSER_BIND_ADDRESS` | `127.0.0.1` | Host interface on which Docker publishes the port. |
 | `PARSER_TRUSTED_PROXIES` | `127.0.0.1,172.16.0.0/12` | Proxy IPs or networks allowed to supply forwarded client addresses and schemes. |
 | `PARSER_IMAGE` | `subscription-parser:local` | Image reference used by Compose. |
+| `PARSER_FETCH_WORKERS` | `8` | Concurrent provider downloads, from 1 to 32. |
+| `PARSER_FETCH_TIMEOUT_SECONDS` | `30` | Total deadline per provider download, including DNS, redirects, retries and response bodies; from 1 to 120 seconds. |
+| `PARSER_CHECK_WORKERS` | `8` | Concurrent isolated client-core checks, from 1 to 128. |
+| `PARSER_CHECK_BATCH_SECONDS` | `60` | Check-batch budget before saving results and publishing; from 1 to 300 seconds. Running cores may need a few extra seconds to terminate. |
 
 Compose sets `PARSER_DATA_DIR=/data` and
 `PARSER_TOOLS_DIR=/opt/client-cores` inside the container. HWIDs, provider URLs,
@@ -81,6 +85,22 @@ docker compose up -d --wait
 A plain `docker compose restart` keeps the container's existing environment.
 Changing the admin key revokes existing sessions while retaining the enrolled
 authenticator and saved subscriptions.
+
+For large libraries, size concurrency against CPU, memory and network capacity.
+Each active connection check starts a client core and a short-lived HTTPS helper.
+An approximate full sweep takes `compatible checks × average check duration ÷ workers`,
+plus preparation, publication and continuation gaps. Include core startup and failed
+requests when measuring duration. For example, 10,000 servers supporting all three
+cores require 30,000 checks; at two seconds each, 32 workers need about 31 minutes
+before overhead. Set the dashboard's check interval to allow a complete sweep, or
+increase concurrency after measuring resource use. Provider count alone does not
+determine check capacity.
+
+Downloads and cached connection checks can progress concurrently during a global
+refresh. Check batches save pending work for continuation, and accepted jobs resume
+after a restart. Expired nodes are removed from feeds independently of running
+jobs; servers with current passing checks remain available. The 200-provider limit
+does not guarantee a particular number of fresh servers on every host.
 
 ## HTTPS and reverse proxies
 
