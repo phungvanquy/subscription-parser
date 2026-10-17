@@ -22,7 +22,7 @@ A saved HWID is never preselected automatically. The application supports up to
 Bulk entry accepts up to 50 providers at a time; repeat it to add larger libraries.
 
 Changing a provider's URL, device assignment, or user agent in the dashboard
-requires another fetch test. A name-only edit does not. Fetch tests validate
+requires another fetch test. Name-only and server-limit edits do not. Fetch tests validate
 retrieval and conversion; the separate connection checks test remote servers.
 
 The **Providers** page shows working servers alongside each provider's total.
@@ -32,6 +32,33 @@ one format with current passing connection checks; pending, failed, and expired
 checks do not count. A shared server counts once for each provider that supplies it.
 Select the working count to open **Server library**, filtered to that provider's
 passing servers. Use **All providers** and **All results** to clear those filters.
+
+### Limit servers per provider
+
+In **Add provider** or **Edit provider**, set **Maximum servers to test** to a
+number such as **20**, then save. Leave it blank for unlimited, which is the
+default for existing providers. During bulk entry, the number applies to each
+provider separately.
+
+If a provider returns 200 distinct servers and the limit is 20, each successful
+fetch randomly selects 20 without replacement from the full list. It does not
+take the first 20, and duplicate rows do not get extra chances. Only selected
+servers enter connection checks, Server library, and output subscriptions. Each
+compatible client core still has its own check, so 20 servers may require 60
+core checks. Only servers that pass are published; failures do not trigger
+replacement draws to fill the limit. If fewer than 20 servers are available,
+all are selected.
+
+**Check servers**, restarts, and failed provider downloads keep the saved
+selection. **Refresh provider**, **Refresh all**, and scheduled successful
+downloads make a new random selection, even if the provider returns the same
+list. A server can be selected again in a later draw. Editing the limit applies
+to the cached list immediately without downloading again; newly selected servers
+need current passing checks before publication.
+
+Provider rows show the selected count, full fetched count, and configured limit.
+The saved response retains the full list, so increasing or clearing the limit
+does not require another fetch.
 
 ### Refresh and cache behavior
 

@@ -78,6 +78,10 @@ failed responses, incremental background checks, and explicit full rechecks.
 Scaling regressions also cover bounded submission, fairness after failed batches,
 download deadlines, restart recovery, publication expiry during active jobs,
 cached validation and conditional dashboard polling.
+Provider sampling cases cover random selection independent of order and duplicate
+rows, probe/feed limits, saved draws across rechecks and restarts, new draws on
+successful fetches, preview reuse, per-subscription scope isolation, native
+dependencies, and transactional upgrades from schema 6.
 
 Measure application overhead with an isolated synthetic library:
 

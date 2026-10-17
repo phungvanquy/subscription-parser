@@ -8,6 +8,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import random
 import secrets
 import threading
 import time
@@ -114,7 +115,10 @@ class Manager:
         providers = (config or self.store.config())['providers']
         with self.store.connection() as connection:
             revisions = dict(connection.execute('SELECT id, revision FROM hwids'))
-        values = [[p['id'], p['name'], self.request_fingerprint(p, revisions)] for p in providers if p['enabled']]
+        # Preserve existing snapshot keys for unlimited providers on upgrade.
+        values = [[p['id'], p['name'], self.request_fingerprint(p, revisions)]
+                  + ([p['server_limit']] if p.get('server_limit') is not None else [])
+                  for p in providers if p['enabled']]
         return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
     def _upgrade_cached_requests(self):
@@ -135,20 +139,41 @@ class Manager:
         stat = path.stat()
         return stat.st_mtime_ns, stat.st_size
 
+    @staticmethod
+    def provider_entries(body, provider, seed):
+        entries = protocols.parse(body, provider['name'])
+        identities = {entry.identity for entry in entries}
+        fetched_count = len(identities)
+        limit = provider.get('server_limit')
+        digest = hashlib.sha256(body).hexdigest()
+        if limit is not None:
+            # Sample distinct servers, so duplicate rows cannot bias the draw.
+            # A saved random seed keeps rechecks/restarts on the same selection.
+            selected = set(random.Random(seed).sample(sorted(identities), min(limit, fetched_count)))
+            entries = [entry for entry in entries if entry.identity in selected]
+            digest = hashlib.sha256(json.dumps([digest, sorted(selected)]).encode()).hexdigest()
+        return entries, fetched_count, digest
+
     def read_cached(self, provider, fingerprint, path):
-        stamp = self.cache_stamp(path)
-        key = (fingerprint, provider['name'], checked_combine)
+        key = (fingerprint, provider['name'], provider.get('server_limit'), checked_combine)
         with self.cache_guard:
+            stamp = self.cache_stamp(path)
             cached = self.parsed_cache.get(provider['id'])
             if cached and cached['key'] == key and cached['stamp'] == stamp:
                 return cached
-        cache = json.loads(common.read_limited(path, common.MAX_BYTES * 4 // 3 + 65536))
-        if cache['fingerprint'] != fingerprint:
-            raise LookupError
+            cache = json.loads(common.read_limited(path, common.MAX_BYTES * 4 // 3 + 65536))
+            if cache['fingerprint'] != fingerprint:
+                raise LookupError
+            if provider.get('server_limit') is not None and not cache.get('sample_seed'):
+                # First limit on a pre-upgrade cache: save the draw before use.
+                # Share the write lock with downloads to avoid replacing a new response.
+                cache['sample_seed'] = secrets.token_hex(16)
+                common.atomic_write(path, common.json_text(cache))
+                stamp = self.cache_stamp(path)
         body = base64.b64decode(cache['body'], validate=True)
-        cached = {'key': key, 'stamp': stamp, 'digest': hashlib.sha256(body).hexdigest(),
-                  'entries': protocols.parse(body, provider['name']), 'metadata': cache['metadata'],
-                  'validated': False}
+        entries, fetched_count, digest = self.provider_entries(body, provider, cache.get('sample_seed'))
+        cached = {'key': key, 'stamp': stamp, 'digest': digest, 'body_digest': hashlib.sha256(body).hexdigest(),
+                  'entries': entries, 'metadata': cache['metadata'], 'fetched_count': fetched_count, 'validated': False}
         with self.cache_guard:
             self.parsed_cache[provider['id']] = cached
         return cached
@@ -156,7 +181,7 @@ class Manager:
     def fetch(self, provider, download=True):
         cache_path = self.store.directory / "cache" / (provider["id"] + ".json")
         fingerprint = self.request_fingerprint(provider)
-        status = {"id": provider["id"], "status": "unavailable", "count": 0, "protocols": {}}
+        status = {"id": provider["id"], "status": "unavailable", "count": 0, "fetched_count": 0, "protocols": {}}
         entries = []
         stage = 'fetch'
         try:
@@ -164,26 +189,31 @@ class Manager:
                 raise LookupError
             hwid = self.store.hwid_value(provider['hwid_id']) if provider['hwid_id'] is not None else None
             body, metadata = self.fetcher(provider["url"], hwid, provider["user_agent"], self.fetch_timeout)
-            digest = hashlib.sha256(body).hexdigest()
-            key = (fingerprint, provider['name'], checked_combine)
+            body_digest = hashlib.sha256(body).hexdigest()
+            seed = secrets.token_hex(16)
+            key = (fingerprint, provider['name'], provider.get('server_limit'), checked_combine)
             with self.cache_guard:
                 cached = self.parsed_cache.get(provider['id'])
             stage = 'parse'
-            if cached and cached['key'] == key and cached['digest'] == digest and cached['validated']:
+            if (cached and cached['key'] == key and cached['body_digest'] == body_digest
+                    and cached['validated'] and provider.get('server_limit') is None):
                 entries = cached['entries']
+                fetched_count, digest = cached['fetched_count'], cached['digest']
             else:
-                entries = protocols.parse(body, provider["name"])
+                entries, fetched_count, digest = self.provider_entries(body, provider, seed)
                 stage = 'validate'
                 accepted = checked_combine(entries, self.store.root)
                 self.log_validation(accepted, provider['id'])
                 if not any(accepted["counts"].values()):
                     raise common.SubscriptionError("provider response has no client-accepted servers")
-            common.atomic_write(cache_path, common.json_text({"fingerprint": fingerprint, "metadata": metadata,
-                                                             "body": base64.b64encode(body).decode()}))
             with self.cache_guard:
+                common.atomic_write(cache_path, common.json_text({"fingerprint": fingerprint, "metadata": metadata,
+                    "body": base64.b64encode(body).decode(), 'sample_seed': seed}))
                 self.parsed_cache[provider['id']] = {'key': key, 'stamp': self.cache_stamp(cache_path),
-                    'digest': digest, 'entries': entries, 'metadata': metadata, 'validated': True}
-            status.update(status="fresh", fetched_at=metadata.get("fetched_at", common.now()), _content_key=digest)
+                    'digest': digest, 'body_digest': body_digest, 'entries': entries, 'metadata': metadata,
+                    'fetched_count': fetched_count, 'validated': True}
+            status.update(status="fresh", fetched_at=metadata.get("fetched_at", common.now()),
+                          fetched_count=fetched_count, _content_key=digest)
         except (common.SubscriptionError, OSError, ValueError, LookupError, RecursionError) as exc:
             if not isinstance(exc, LookupError):
                 status["error"] = str(exc) if isinstance(exc, common.SubscriptionError) else "provider could not be fetched or parsed"
@@ -193,7 +223,8 @@ class Manager:
                 entries = cache['entries']
                 previous = self.snapshot.get("providers", {}).get(provider["id"], {})
                 status.update(status="cached" if download else previous.get("status", "cached"),
-                              fetched_at=cache["metadata"].get("fetched_at"), _content_key=cache['digest'])
+                              fetched_at=cache["metadata"].get("fetched_at"),
+                              fetched_count=cache['fetched_count'], _content_key=cache['digest'])
                 if not download and previous.get("error"):
                     status["error"] = previous["error"]
                 if download:
@@ -628,8 +659,10 @@ class Manager:
             if not delete and preview:
                 cache_path = self.store.directory / 'cache' / (provider['id'] + '.json')
                 old_cache = cache_path.read_text() if cache_path.exists() else None
-                common.atomic_write(cache_path, common.json_text({'fingerprint': preview['fingerprint'],
-                    'metadata': preview['metadata'], 'body': base64.b64encode(preview['body']).decode()}))
+                with self.cache_guard:
+                    common.atomic_write(cache_path, common.json_text({'fingerprint': preview['fingerprint'],
+                        'metadata': preview['metadata'], 'body': base64.b64encode(preview['body']).decode(),
+                        'sample_seed': preview['sample_seed']}))
                 try:
                     self.store.save_config(config)
                 except Exception:
@@ -667,7 +700,8 @@ class Manager:
             self.busy_provider_id = provider_id
         try:
             body, metadata = self.fetcher(provider['url'], hwid, provider['user_agent'], self.fetch_timeout)
-            entries = protocols.parse(body, provider['name'])
+            seed = secrets.token_hex(16)
+            entries, fetched_count, _ = self.provider_entries(body, provider, seed)
             result = checked_combine(entries, self.store.root)
             self.log_validation(result, provider['id'])
             if not any(result['counts'].values()):
@@ -678,9 +712,10 @@ class Manager:
                 while self.previews and (len(self.previews) >= 50 or sum(len(p['body']) for p in self.previews.values()) + len(body) > 64 * 1024 * 1024):
                     self.previews.pop(next(iter(self.previews)))
                 self.previews[token] = {'provider': provider, 'previous': previous, 'fingerprint': fingerprint,
-                    'body': body, 'metadata': metadata, 'expires': time.monotonic() + 600}
+                    'body': body, 'metadata': metadata, 'sample_seed': seed, 'expires': time.monotonic() + 600}
             self.logs.write('provider_tested', provider_id=provider['id'], servers=len(entries))
-            return {'test_token': token, 'counts': result['counts'], 'tested_at': common.now()}
+            return {'test_token': token, 'counts': result['counts'], 'tested_at': common.now(),
+                    'fetched_count': fetched_count, 'selected_count': len({entry.identity for entry in entries})}
         except common.SubscriptionError as error:
             self.logs.write('provider_test_failed', provider_id=provider['id'], error=error)
             message = str(error).replace(provider['url'], '[subscription]')

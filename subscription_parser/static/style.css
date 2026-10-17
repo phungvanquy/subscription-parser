@@ -100,7 +100,7 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
 .provider-client-counts { display: grid; gap: 9px; margin-top: 8px; padding: 12px; border-radius: 8px; background: #f4f7f5; color: var(--muted); font-size: 12px; }
 .provider-client-counts > span { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .provider-client-counts strong { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.provider-check-note { display: block; margin: 2px 0; color: var(--muted); font-size: 11px; }
+.provider-check-note, .provider-sample-note { display: block; margin: 2px 0; color: var(--muted); font-size: 11px; }
 .provider-device .device-label { max-width: none; margin-top: 9px; font-family: inherit; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .provider-fetch-time { display: block; margin-top: 7px; color: var(--muted); font-size: 12px; }
 .provider-fetch-error { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 7px; color: #a73f39; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }

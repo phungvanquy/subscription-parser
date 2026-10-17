@@ -143,7 +143,7 @@ subscription; that subscription may have its own edited provider selection.
 
 | Method | Path | Behavior |
 | --- | --- | --- |
-| POST | `/api/providers/test` | Fetches and validates a candidate provider. Returns `test_token`, per-client `counts`, and `tested_at`. |
+| POST | `/api/providers/test` | Fetches and validates a candidate provider's selection. Returns `test_token`, per-client `counts`, `fetched_count`, `selected_count`, and `tested_at`. |
 | POST | `/api/providers` | Creates a provider; returns HTTP 201 and its public metadata. |
 | PUT | `/api/providers/{id}` | Updates a provider. |
 | DELETE | `/api/providers/{id}` | Removes the provider and its subscription assignments. |
@@ -156,7 +156,8 @@ Test a new provider with:
   "url": "https://provider.example/subscription",
   "hwid_id": null,
   "user_agent": "Happ/2.3.1",
-  "enabled": true
+  "enabled": true,
+  "server_limit": 20
 }
 ```
 
@@ -165,10 +166,24 @@ to omit the HWID header. On creation the field must be present; a blank string
 is invalid. Names are required, unique, and limited to 80 characters. URLs must
 be HTTPS without embedded HTTP login credentials. There is a 200-provider limit.
 
+`server_limit` is optional: use an integer from 1 to 100000, or `null` for
+unlimited (the default). Each successful fetch randomly samples up to that many
+distinct servers before validation, connection checks, and publication. Duplicate
+rows do not increase a server's chance of selection. Cached rechecks, failed
+downloads, and restarts retain the selection; the next successful fetch draws
+again, even when its response body is unchanged. Fewer servers may pass than the
+limit; failed selections are not replaced by extra probes.
+
+On `PUT`, omitting `server_limit` preserves it. Changing only the limit applies
+immediately to the cached response without another provider request. Provider
+state reports `fetched_count` for the full distinct response and `count` for the
+selected servers; inventory and all output subscriptions use only the selection.
+
 To save a tested provider, send the same fields to `/api/providers` with the
 returned `test_token`. Tokens are single-use, expire after ten minutes, and bind
 to the settings and device revision that were tested. They are temporary process
-state, so a restart requires another test. Saving reuses the tested response.
+state, so a restart requires another test. Saving reuses the tested response and
+the exact random selection. Changing the limit invalidates a preview token.
 
 When testing an edit, include `provider_id`. On `PUT`, include the required
 `name`; omit `hwid_id` to retain the assignment and omit `url` or use an empty URL

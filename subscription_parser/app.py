@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import common, publication
-from .config import MAX_PROVIDERS, admin_key
+from .config import MAX_PROVIDERS, MAX_PROVIDER_SERVERS, admin_key
 from .auth import Auth, AuthError, SESSION_SECONDS
 from .fetch import bounded_fetch_subscription
 from .service import Manager, Busy
@@ -40,6 +40,7 @@ class Provider(BaseModel):
     hwid_id: str | None = Field(default=None, min_length=1, max_length=100)
     user_agent: str = Field(default="Happ/2.3.1", max_length=200)
     enabled: bool = True
+    server_limit: int | None = Field(default=None, ge=1, le=MAX_PROVIDER_SERVERS, strict=True)
     test_token: str | None = Field(default=None, min_length=1, max_length=100)
 
 

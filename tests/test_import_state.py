@@ -98,6 +98,21 @@ class StateImportTests(unittest.TestCase):
         with self.assertRaisesRegex(common.SubscriptionError, 'already contains'):
             self.import_source()
 
+    def test_version_six_backup_restores_and_upgrades_with_unlimited_providers(self):
+        original = Store(self.source)
+        config = original.config()
+        config['providers'] = [original.provider({'name': 'Existing', 'url': 'https://existing.example/sub', 'hwid_id': None})]
+        original.save_config(config)
+        token = original.credential('subscription_token')
+        with original.connection(write=True) as connection:
+            connection.execute('ALTER TABLE providers DROP COLUMN server_limit')
+            connection.execute('PRAGMA user_version = 6')
+        self.import_source()
+        restored = Store(self.destination)
+        self.assertEqual(restored.config(), config)
+        self.assertEqual(restored.credential('subscription_token'), token)
+        self.assertEqual(restored.hwids(), original.hwids())
+
     def test_invalid_database_and_unfinished_journal_are_rejected(self):
         (self.source/'app.sqlite3').write_bytes(b'not a database')
         with self.assertRaisesRegex(common.SubscriptionError, 'invalid'):

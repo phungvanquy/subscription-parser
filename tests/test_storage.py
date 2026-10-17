@@ -50,7 +50,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(actual['refresh_seconds'], original['refresh_seconds'])
         for old, new in zip(original['providers'], actual['providers'], strict=True):
             self.assertEqual(hwids[new['hwid_id']]['name'], old['device_id_env'])
-            self.assertEqual({k:v for k,v in new.items() if k != 'hwid_id'}, {k:v for k,v in old.items() if k != 'device_id_env'})
+            self.assertEqual({k:v for k,v in new.items() if k not in {'hwid_id', 'server_limit'}}, {k:v for k,v in old.items() if k != 'device_id_env'})
+            self.assertIsNone(new['server_limit'])
         self.assertEqual(store.hwid_value(actual['providers'][0]['hwid_id']), 'first-authorized-id')
         self.assertEqual(store.hwid_value(actual['providers'][1]['hwid_id']), 'second-authorized-id')
         self.assertFalse(next(h for h in hwids.values() if h['name']=='UNUSED_DEVICE_ID')['configured'])

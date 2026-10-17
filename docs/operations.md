@@ -113,7 +113,7 @@ removes it and is not part of this restore procedure.
 
 ## Migrations
 
-The current SQLite schema version is **6**. Supported upgrades are applied in
+The current SQLite schema version is **7**. Supported upgrades are applied in
 order, with each migration committed transactionally.
 
 | Version introduced | Change |
@@ -123,6 +123,7 @@ order, with each migration committed transactionally.
 | 4 | Adds the connection-check schedule. |
 | 5 | Adds named subscriptions and provider selections, retaining the original token. |
 | 6 | Adds authenticator enrollment, recovery-code hashes, session hashes, and persistent authentication counters. |
+| 7 | Adds optional per-provider random server limits; existing providers remain unlimited. |
 
 For versions that kept the admin key in SQLite, obtain the existing key using the
 old running version before upgrading, and put it in the checkout's `.env` as

@@ -171,7 +171,7 @@ assert all(path.stat().st_mode & 0o777 == 0o600 for path in Path('/data/logs').i
 store = Store(Path('/data'))
 with store.connection() as connection:
     assert connection.execute('SELECT count(*) FROM subscriptions').fetchone()[0] == 2
-    assert connection.execute('PRAGMA user_version').fetchone()[0] == 6
+    assert connection.execute('PRAGMA user_version').fetchone()[0] == 7
 identities = {item['name']: item['id'] for item in store.hwids()}
 assert store.hwid_value(identities['DEVICE_ID']) == 'docker-authorized-id'
 assert store.hwid_value(identities['Second device']) == 'docker-second-authorized-id'

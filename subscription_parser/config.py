@@ -4,6 +4,7 @@ import os
 from .common import SubscriptionError
 
 MAX_PROVIDERS = 200
+MAX_PROVIDER_SERVERS = 100000
 
 
 def env_int(name, default, minimum, maximum):

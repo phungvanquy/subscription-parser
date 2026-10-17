@@ -12,10 +12,10 @@ import tempfile
 from urllib.parse import urlsplit
 
 from . import common
-from .config import admin_key
+from .config import MAX_PROVIDER_SERVERS, admin_key
 from .auth import AUTH_SCHEMA
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 CREDENTIALS_SCHEMA = """CREATE TABLE credentials (
     name TEXT PRIMARY KEY CHECK(name = 'subscription_token'),
     value TEXT NOT NULL CHECK(length(value) > 0)
@@ -27,7 +27,8 @@ PROVIDERS_SCHEMA = """CREATE TABLE providers (
     hwid_id TEXT REFERENCES hwids(id) ON DELETE RESTRICT,
     user_agent TEXT NOT NULL,
     enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
-    position INTEGER NOT NULL
+    position INTEGER NOT NULL,
+    server_limit INTEGER CHECK(server_limit IS NULL OR server_limit BETWEEN 1 AND 100000)
 );"""
 SUBSCRIPTIONS_SCHEMA = """CREATE TABLE subscriptions (
     id TEXT PRIMARY KEY,
@@ -56,7 +57,9 @@ CREATE TABLE settings (
     check_seconds INTEGER NOT NULL DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)
 );
 """ + AUTH_SCHEMA
-PROVIDER_INSERT = 'INSERT INTO providers VALUES (?, ?, ?, ?, ?, ?, ?)'
+PROVIDER_INSERT = ('INSERT INTO providers '
+                   '(id, name, url, hwid_id, user_agent, enabled, position, server_limit) '
+                   'VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
 
 
 class Store:
@@ -109,6 +112,8 @@ class Store:
                 self._migrate_subscriptions()
             if version in {1, 2, 3, 4, 5}:
                 self._migrate_auth()
+            if version in {1, 2, 3, 4, 5, 6}:
+                self._migrate_server_limits()
             with self.connection() as connection:
                 if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
                     raise common.SubscriptionError('unsupported application database version')
@@ -146,7 +151,8 @@ class Store:
                 connection.execute('ALTER TABLE hwids ADD COLUMN revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0)')
                 connection.execute('ALTER TABLE providers RENAME TO old_providers')
                 connection.execute(PROVIDERS_SCHEMA)
-                connection.execute('INSERT INTO providers SELECT * FROM old_providers')
+                connection.execute('INSERT INTO providers (id, name, url, hwid_id, user_agent, enabled, position) '
+                                   'SELECT id, name, url, hwid_id, user_agent, enabled, position FROM old_providers')
                 connection.execute('DROP TABLE old_providers')
                 connection.execute('PRAGMA user_version = 3')
 
@@ -227,6 +233,18 @@ class Store:
                         connection.execute(statement)
                 connection.execute('PRAGMA user_version = 6')
 
+    def _migrate_server_limits(self):
+        with common.process_lock(self.directory / 'app.lock'):
+            with self.connection(write=True) as connection:
+                if connection.execute('PRAGMA user_version').fetchone()[0] != 6:
+                    return
+                # Earlier device migrations create the current provider table.
+                columns = {row['name'] for row in connection.execute('PRAGMA table_info(providers)')}
+                if 'server_limit' not in columns:
+                    connection.execute('ALTER TABLE providers ADD COLUMN server_limit INTEGER '
+                                       'CHECK(server_limit IS NULL OR server_limit BETWEEN 1 AND 100000)')
+                connection.execute('PRAGMA user_version = 7')
+
     def _initialize(self):
         env, hwids, config, sources = self._legacy_inputs()
         # Publish a complete database with one atomic rename. Failed migrations
@@ -248,7 +266,7 @@ class Store:
                 connection.execute('INSERT INTO settings (id, refresh_seconds) VALUES (1, ?)', (config['refresh_seconds'],))
                 for position, provider in enumerate(config['providers']):
                     connection.execute(PROVIDER_INSERT, (provider['id'], provider['name'], provider['url'],
-                        identities[provider['device_id_env']], provider['user_agent'], int(provider['enabled']), position))
+                        identities[provider['device_id_env']], provider['user_agent'], int(provider['enabled']), position, None))
                 for name, digest in sources.items():
                     connection.execute('INSERT INTO metadata VALUES (?, ?)', ('legacy:' + name, digest))
                 connection.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
@@ -445,7 +463,7 @@ class Store:
     def config(self):
         with self.connection() as connection:
             providers = [dict(row) for row in connection.execute(
-                'SELECT id, name, url, hwid_id, user_agent, enabled FROM providers ORDER BY position')]
+                'SELECT id, name, url, hwid_id, user_agent, enabled, server_limit FROM providers ORDER BY position')]
             for provider in providers:
                 provider['enabled'] = bool(provider['enabled'])
             settings = dict(connection.execute('SELECT * FROM settings WHERE id = 1').fetchone())
@@ -467,8 +485,9 @@ class Store:
                 for position, provider in enumerate(config['providers']):
                     connection.execute(PROVIDER_INSERT + ' ON CONFLICT(id) DO UPDATE SET name=excluded.name, '
                         'url=excluded.url, hwid_id=excluded.hwid_id, user_agent=excluded.user_agent, '
-                        'enabled=excluded.enabled, position=excluded.position', (provider['id'], provider['name'], provider['url'],
-                        provider['hwid_id'], provider['user_agent'], int(provider['enabled']), position))
+                        'enabled=excluded.enabled, position=excluded.position, server_limit=excluded.server_limit',
+                        (provider['id'], provider['name'], provider['url'], provider['hwid_id'], provider['user_agent'],
+                         int(provider['enabled']), position, provider.get('server_limit')))
         except sqlite3.IntegrityError:
             raise common.SubscriptionError('provider settings conflict or reference a missing HWID') from None
 
@@ -501,8 +520,12 @@ class Store:
         identifier = values.get('hwid_id')
         if identifier is not None:
             self.hwid_value(identifier)
+        limit = values.get('server_limit')
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= MAX_PROVIDER_SERVERS):
+            raise common.SubscriptionError(f'server limit must be an integer between 1 and {MAX_PROVIDER_SERVERS}, or null for unlimited')
         return {'id': previous['id'] if previous else secrets.token_hex(6), 'name': name, 'url': url,
-                'hwid_id': identifier, 'user_agent': agent, 'enabled': bool(values.get('enabled', True))}
+                'hwid_id': identifier, 'user_agent': agent, 'enabled': bool(values.get('enabled', True)),
+                'server_limit': limit}
 
     def public_provider(self, provider):
         parsed = urlsplit(provider['url'])

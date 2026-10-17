@@ -179,7 +179,8 @@ function providerServerCell(provider,servers,expanded){
   const active=state.busy&&(!state.busy_provider_id||state.busy_provider_id===provider.id);
   const note=!provider.enabled?'Paused':active&&state.busy_action==='checking'?'Checking…':active&&state.busy_action==='fetching'?'Refreshing…':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
   const detailsId=`provider-clients-${provider.id}`;
-  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${provider.count||0}</span> total</span></div>
+  return `<div class="provider-server-summary"><button id="provider-working-${esc(provider.id)}" class="provider-working ${working?'has-working':''}" data-provider-servers="${esc(provider.id)}" aria-label="View ${working} working servers from ${esc(provider.name)}"><strong>${working}</strong> working</button><span class="provider-server-total">/ <span class="server-count">${provider.count||0}</span> ${provider.server_limit?'selected':'total'}</span></div>
+    ${provider.server_limit?`<small class="provider-sample-note">${provider.fetched_count??provider.count??0} fetched · random limit ${provider.server_limit}</small>`:''}
     ${note?`<small class="provider-check-note">${note}</small>`:''}
     <details id="${esc(detailsId)}" class="provider-client-details" ${expanded.has(detailsId)?'open':''}><summary id="provider-breakdown-${esc(provider.id)}">By client ${icon('chevron')}</summary><div class="provider-client-counts" role="group" aria-label="Working servers by client">${clients.map(([client,label])=>`<span>${label}<strong>${servers.filter(n=>n.clients.includes(client)).length}</strong></span>`).join('')}</div></details>`;
 }
@@ -350,6 +351,8 @@ function rebuildAssignments(){
 }
 function providerRequests(){
   const id=$('provider-id').value,urls=providerURLs(),prefix=$('provider-name').value.trim();
+  const serverLimit=$('provider-server-limit').value===''?null:Number($('provider-server-limit').value);
+  if(serverLimit!==null&&(!Number.isInteger(serverLimit)||serverLimit<1||serverLimit>100000))throw new Error('Enter a whole server limit from 1 to 100000, or leave it blank for unlimited.');
   if(id&&urls.length>1)throw new Error('Use one subscription URL when editing a provider.');
   if(urls.length>50)throw new Error('Add at most 50 providers at a time.');
   if(!id&&!urls.length)throw new Error('Enter a subscription link.');
@@ -358,7 +361,7 @@ function providerRequests(){
     const choice=urls.length>1?$(`assignment-${index}`).value:$('provider-hwid').value;
     if(!choice)throw new Error(`Choose a device or “No device ID” for link ${index+1}.`);
     const inferred=prefix||(url?new URL(url).hostname:providerOriginal.name);
-    return {name:inferred+(urls.length>1?` ${index+1}`:''),url,hwid_id:choice==='__none__'?null:choice,user_agent:$('provider-agent').value,enabled:providerOriginal?.enabled??true};
+    return {name:inferred+(urls.length>1?` ${index+1}`:''),url,hwid_id:choice==='__none__'?null:choice,user_agent:$('provider-agent').value,enabled:providerOriginal?.enabled??true,server_limit:serverLimit};
   });
 }
 function needsProviderTest(request){return !providerOriginal||request.url!==''||request.hwid_id!==providerOriginal.hwid_id||request.user_agent!==providerOriginal.user_agent;}
@@ -372,6 +375,7 @@ function openProvider(provider){
   $('provider-form').reset();$('provider-error').textContent='';$('provider-test-result').hidden=true;
   $('provider-id').value=provider?.id||'';$('provider-name').value=provider?.name||'';
   $('provider-agent').value=provider?.user_agent||'Happ/2.3.1';$('provider-url').value='';$('provider-url').required=!provider;
+  $('provider-server-limit').value=provider?.server_limit??'';
   $('provider-url').placeholder=provider?'Leave blank to keep the saved link':'https://provider.example/subscription\nAdd multiple links, one per line';
   $('provider-url-hint').textContent=provider?'Leave blank to keep the existing subscription URL.':'Assign a device separately for each subscription link.';
   $('provider-dialog-title').textContent=provider?'Edit provider':'Add a provider';
@@ -403,7 +407,7 @@ $('test-provider').addEventListener('click',async()=>{
       catch(error){throw new Error(`Link ${i+1}: ${error.message}`);}
     }
     $('provider-test-result').textContent=requests.map((body,i)=>{
-      const result=testRuns.get(JSON.stringify(body));return result?`Link ${i+1}: fetch passed (${Object.entries(result.counts).map(([client,count])=>`${client}: ${count}`).join(', ')}).`:`Link ${i+1}: already saved.`;
+      const result=testRuns.get(JSON.stringify(body));return result?`Link ${i+1}: fetch passed${body.server_limit?` (${result.selected_count} randomly selected from ${result.fetched_count} servers)`:''} (${Object.entries(result.counts).map(([client,count])=>`${client}: ${count}`).join(', ')}).`:`Link ${i+1}: already saved.`;
     }).join(' ');
   }catch(error){$('provider-test-result').hidden=true;$('provider-error').textContent=error.message;}
   finally{providerBusy(false);}
