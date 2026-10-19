@@ -174,6 +174,153 @@ def check_large_provider_list(page, checks):
         page.set_viewport_size({'width': 1440, 'height': 1000})
 
 
+def check_large_subscription_list(page, checks):
+    """Browse a large directory while live updates and detail navigation run."""
+    fixture = page.evaluate('state')
+    sample = fixture['subscriptions'][0]
+    fixture.update(subscriptions=[], busy=False, refresh_running=False,
+                   check_running=False, check_queued=False,
+                   revision='synthetic-subscription-list')
+    for index in range(200):
+        kind = index % 4
+        included = 200 - index if kind == 0 else 0
+        fixture['subscriptions'].append({**sample,
+            'id': 'default' if index == 0 else f'large-sub-{index}',
+            'name': f'Subscription {index:03}',
+            'all_providers': index == 0,
+            'provider_ids': [] if kind == 3 else [fixture['providers'][0]['id']],
+            'ready': kind != 1, 'published_total': included, 'total': 250,
+            'counts': {key: included for key in sample['counts']},
+            'generated_at': f'2026-01-01T00:{index // 60:02}:{index % 60:02}Z'})
+    fixture['subscriptions'][1]['name'] += ' <private> ' + 'LongName' * 6
+
+    def state_response(route):
+        route.fulfill(json=fixture)
+
+    page.route('**/api/state*', state_response)
+    try:
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.evaluate('loadState()')
+        page.locator('.nav-item[data-page=exports]').click()
+        rows = page.locator('#subscription-list .subscription-row')
+        expect(rows).to_have_count(25)
+        expect(page.locator('#subscription-search-summary')).to_have_text('1–25 of 200 subscriptions')
+        expect(page.locator('#subscription-previous')).to_be_disabled()
+        expect(page.locator('#subscription-detail')).not_to_be_visible()
+        page.locator('#subscription-next').click()
+        expect(page.locator('#subscription-search-summary')).to_have_text('26–50 of 200 subscriptions')
+        link = rows.nth(15).locator('.subscription-open')
+        link.focus()
+        scroll = page.evaluate('scrollY')
+        page.keyboard.press('Enter')
+        expect(page.locator('#subscription-detail-name')).to_have_text('Subscription 040')
+        expect(page.locator('#subscription-detail-name')).to_be_focused()
+        expect(page.locator('#subscription-list')).not_to_be_visible()
+        page.locator('#subscription-menu summary').click()
+        page.evaluate('loadState(true)')
+        expect(page.locator('#rotate-links')).to_be_visible()
+        page.keyboard.press('Escape')
+        page.locator('#back-to-subscriptions').click()
+        expect(link).to_be_focused()
+        expect(page.locator('#subscription-page-label')).to_have_text('2 / 8')
+        assert abs(page.evaluate('scrollY') - scroll) <= 2
+        fixture['subscriptions'][40]['published_total'] -= 1
+        page.evaluate('loadState(true)')
+        expect(link).to_be_focused()
+        expect(rows.nth(15).locator('.subscription-server-cell')).to_contain_text('159 included')
+        checks.append('200-subscription pagination, keyboard detail navigation and return scroll/focus survive live updates')
+
+        page.locator('#subscription-search').fill('sUbScRiPtIoN 199')
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('Subscription 199')
+        expect(page.locator('#subscription-page-label')).to_have_text('1 / 1')
+        page.locator('#subscription-search').fill(fixture['providers'][1]['name'])
+        expect(rows).to_have_count(1)
+        expect(rows.first.locator('.subscription-open')).to_have_attribute('data-subscription-id', 'default')
+        page.locator('#subscription-search').fill('no such subscription')
+        expect(page.locator('#subscriptions-no-results')).to_be_visible()
+        expect(page.locator('#subscription-next')).to_be_disabled()
+        expect(page.locator('#subscription-previous')).to_be_disabled()
+        page.locator('#clear-subscription-search').click()
+        expect(page.locator('#subscription-search')).to_be_focused()
+        for status in ('ready', 'pending', 'empty', 'paused'):
+            page.locator('#subscription-status-filter').select_option(status)
+            expect(page.locator('#subscription-search-summary')).to_have_text('1–25 of 50 subscriptions · 200 total')
+        page.locator('#subscription-search').fill('Subscription 199')
+        expect(rows).to_have_count(1)
+        page.locator('.nav-item[data-page=overview]').click()
+        page.locator('.nav-item[data-page=exports]').click()
+        expect(page.locator('#subscription-search')).to_have_value('Subscription 199')
+        expect(page.locator('#subscription-status-filter')).to_have_value('paused')
+        page.locator('#subscription-search').fill('Subscription 198')
+        expect(page.locator('#subscriptions-no-results')).to_be_visible()
+        page.locator('#clear-subscription-search').click()
+        expect(page.locator('#subscription-status-filter')).to_have_value('')
+        checks.append('subscription name/provider search, all-provider matching, status filters, empty results and navigation preserve filters')
+
+        for sort, name in (('name-desc', 'Subscription 199'), ('servers', 'Subscription 000'),
+                           ('updated', 'Subscription 199'), ('name', 'Subscription 000')):
+            page.locator('#subscription-sort').select_option(sort)
+            expect(rows.first.locator('.subscription-open > span').first).to_have_text(name)
+        page.locator('#subscription-page-size').select_option('50')
+        expect(rows).to_have_count(50)
+        for _ in range(3):
+            page.locator('#subscription-next').click()
+        expect(page.locator('#subscription-search-summary')).to_have_text('151–200 of 200 subscriptions')
+        expect(page.locator('#subscription-next')).to_be_disabled()
+        saved = fixture['subscriptions']
+        fixture['subscriptions'] = saved[:49]
+        page.evaluate('loadState()')
+        expect(rows).to_have_count(49)
+        expect(page.locator('#subscription-search-summary')).to_have_text('1–49 of 49 subscriptions')
+        expect(page.locator('#subscription-page-label')).to_have_text('1 / 1')
+        fixture['subscriptions'] = saved
+        page.evaluate('loadState()')
+        page.locator('#subscription-page-size').select_option('100')
+        expect(rows).to_have_count(100)
+        page.locator('#subscription-page-size').select_option('25')
+        rows.nth(1).locator('.subscription-view').click()
+        fixture['subscriptions'] = [s for s in saved if s['id'] != 'large-sub-1']
+        page.evaluate('loadState(true)')
+        expect(page.locator('#subscription-detail')).not_to_be_visible()
+        expect(page.locator('#subscription-list')).to_be_visible()
+        expect(rows.first.locator('.subscription-open')).to_be_focused()
+        fixture['subscriptions'] = saved
+        page.evaluate('loadState()')
+        checks.append('subscription sorting, 25/50/100 rows, page clamping and return to list when an open subscription is removed')
+
+        for width in (320, 390, 768, 1000, 1440):
+            page.set_viewport_size({'width': width, 'height': 1000})
+            page.evaluate('window.scrollTo(0,0)')
+            assert page.evaluate('document.body.scrollWidth <= innerWidth'), width
+            assert page.locator('#subscription-table-wrap').evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            heights = rows.evaluate_all('rows => rows.map(row => row.getBoundingClientRect().height)')
+            assert max(heights) <= (110 if width <= 760 else 76), (width, heights)
+            if width in (390, 1440) and os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                page.screenshot(path=f"{os.environ['PARSER_TEST_SCREENSHOTS']}/subscriptions-200-{width}.png")
+            rows.nth(1).locator('.subscription-open').focus()
+            page.keyboard.press('Enter')
+            expect(page.locator('#subscription-detail-name')).to_contain_text('<private>')
+            expect(page.locator('#subscription-detail-name')).to_be_focused()
+            assert page.evaluate('document.body.scrollWidth <= innerWidth'), width
+            page.locator('#show-subscription-urls').check()
+            expect(page.locator('.export-url').first).to_be_visible()
+            assert page.evaluate('document.body.scrollWidth <= innerWidth'), width
+            page.locator('#show-subscription-urls').uncheck()
+            page.locator('#back-to-subscriptions').click()
+            expect(rows.nth(1).locator('.subscription-open')).to_be_focused()
+        checks.append('compact subscription rows, long names and details fit 320–1440px screens without horizontal scrolling')
+    finally:
+        page.unroute('**/api/state*', state_response)
+        page.evaluate("""async () => {
+            $('subscription-search').value='';$('subscription-status-filter').value='';
+            $('subscription-sort').value='name';$('subscription-page-size').value='25';
+            subscriptionPage=0;selectedSubscription='default';subscriptionListScroll=0;
+            $('subscriptions-layout').classList.remove('show-detail');await loadState();
+        }""")
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+
+
 @contextmanager
 def checked_browser(checks):
     engine = os.environ.get('PARSER_TEST_ENGINE', 'chromium')
@@ -509,6 +656,7 @@ def main():
                 checks.append('show failed nodes, filter excluded results and recover without fetching providers')
 
                 page.locator('.nav-item[data-page=exports]').click()
+                page.locator('#subscription-list [data-subscription-id=default]').click()
                 page.locator('[data-copy="hiddify.json"]').click()
                 expect(page.locator('#toast')).to_contain_text('copied')
                 copied = read_clipboard(page)
@@ -559,12 +707,21 @@ def main():
                 phone_link = read_clipboard(page)
                 phone_archive = page.request.get(phone_link).json()
                 assert {source for node in phone_archive['servers'] for source in node['sources']} == {providers[0]['name']}
+                page.locator('#back-to-subscriptions').click()
+                page.locator('#subscription-search').fill('my phone')
+                page.locator('#subscription-status-filter').select_option('ready')
+                page.locator('[data-subscription-id="'+phone_id+'"]').click()
                 page.locator('#edit-subscription').click()
                 page.locator('#subscription-provider-choices input[value="'+providers[1]['id']+'"]').check()
                 page.locator('#save-subscription').click()
                 expect(page.locator('#subscription-dialog')).not_to_be_visible()
                 expect(page.locator('#subscription-providers-summary')).to_contain_text(providers[1]['name'])
                 assert {source for node in page.request.get(phone_link).json()['servers'] for source in node['sources']} == {p['name'] for p in providers}
+                page.locator('#back-to-subscriptions').click()
+                expect(page.locator('#subscription-search')).to_have_value('my phone')
+                expect(page.locator('#subscription-status-filter')).to_have_value('ready')
+                page.locator('#subscription-search').fill('no such subscription')
+                page.locator('#clear-subscription-search').click()
                 checks.append('create scoped subscriptions, require a provider and edit selections without changing links')
 
                 page.locator('#add-subscription').click()
@@ -579,12 +736,13 @@ def main():
                 page.locator('[data-copy="v2board.txt"]').click()
                 family_link = read_clipboard(page)
                 assert family_link != legacy_link
+                page.locator('#back-to-subscriptions').click()
                 page.locator('#subscription-search').fill('my phone')
-                expect(page.locator('#subscription-list > li')).to_have_count(1)
+                expect(page.locator('#subscription-list .subscription-row')).to_have_count(1)
                 page.locator('#subscription-search').fill('no such subscription')
                 expect(page.locator('#subscriptions-no-results')).to_be_visible()
                 page.locator('#clear-subscription-search').click()
-                expect(page.locator('#subscription-list > li')).to_have_count(3)
+                expect(page.locator('#subscription-list .subscription-row')).to_have_count(3)
                 expect(page.locator('#subscription-search')).to_be_focused()
                 page.locator('[data-subscription-id="'+phone_id+'"]').click()
                 expect(page.locator('#subscription-detail-name')).to_have_text('My phone <private>')
@@ -644,6 +802,7 @@ def main():
                 assert len(seen) == subscription_fetches
                 checks.append('independent subscription links, rotation, deletion, safe names and mobile controls without extra fetches')
                 checks.append('mobile list and detail navigation, keyboard selection and searchable provider choices')
+                check_large_subscription_list(page, checks)
 
                 page.locator('.nav-item[data-page=providers]').click()
                 limited_row = page.locator('#provider-rows .provider-row').filter(has_text='Demo 2')

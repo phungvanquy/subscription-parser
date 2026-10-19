@@ -130,9 +130,15 @@ independently.
 
 ### Find, edit, and rotate links
 
-Search the subscription list by subscription or provider name. Select an entry
-to see its selected providers, included/excluded totals, and per-client counts.
-On a phone, **All subscriptions** returns to the list.
+The subscription list shows provider counts, status, and included/total servers
+in compact rows. Search by subscription or provider name, filter by status, and
+sort by name, included servers, or most recently updated. Provider searches also
+match subscriptions that use all providers. Choose 25, 50, or 100 rows per page.
+
+Select a name or **View links** to open its providers, included/excluded totals,
+and per-client import links. **All subscriptions** returns to your search,
+filters, page, and scroll position on desktop and mobile. Live updates keep your
+list controls in place; pages adjust automatically when subscriptions disappear.
 
 | Action | Result |
 | --- | --- |

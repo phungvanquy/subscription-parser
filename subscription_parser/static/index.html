@@ -73,13 +73,17 @@
 
         <section id="exports-section" class="page-section" hidden>
           <div id="subscriptions-layout" class="subscriptions-layout">
-            <aside class="subscription-directory panel" aria-label="Your subscriptions">
-              <div class="directory-heading"><h2>Subscriptions <span id="subscription-total" class="count-pill">0</span></h2><p>Select one to view its import links.</p></div>
-              <div class="directory-search"><span data-icon="search"></span><input id="subscription-search" type="search" placeholder="Find a subscription…" aria-label="Search subscriptions by name or provider"></div>
-              <p id="subscription-search-summary" class="sr-only" aria-live="polite"></p>
-              <ul id="subscription-list" class="subscription-list"></ul>
-              <div id="subscriptions-no-results" class="directory-empty" hidden><span data-icon="search"></span><strong>No subscriptions found</strong><p>Try a different name or provider.</p><button class="text-button" id="clear-subscription-search">Clear search</button></div>
-            </aside>
+            <div class="subscription-directory panel">
+              <div class="panel-heading"><div><h2 id="subscription-list-title">Your subscriptions <span id="subscription-total" class="count-pill">0</span></h2><p>Open a subscription to copy its import links or manage its providers.</p></div></div>
+              <div id="subscription-toolbar" class="subscription-toolbar">
+                <div class="directory-search"><span data-icon="search"></span><input id="subscription-search" type="search" placeholder="Search by name or provider…" aria-label="Search subscriptions by name or provider"></div>
+                <select id="subscription-status-filter" aria-label="Filter subscriptions by status"><option value="">All statuses</option><option value="ready">Ready to import</option><option value="pending">Checks pending</option><option value="empty">No passing servers</option><option value="paused">No active providers</option></select>
+                <select id="subscription-sort" aria-label="Sort subscriptions"><option value="name">Name: A–Z</option><option value="name-desc">Name: Z–A</option><option value="servers">Most included servers</option><option value="updated">Recently updated</option></select>
+              </div>
+              <div id="subscription-table-wrap"><table class="subscriptions-table" aria-labelledby="subscription-list-title"><thead><tr><th scope="col">SUBSCRIPTION</th><th scope="col">PROVIDERS</th><th scope="col">STATUS</th><th scope="col">SERVERS</th><th scope="col"><span class="sr-only">Import links</span></th></tr></thead><tbody id="subscription-list"></tbody></table></div>
+              <div id="subscriptions-no-results" class="directory-empty" hidden><span data-icon="search"></span><strong>No subscriptions found</strong><p>Try a different name, provider, or status.</p><button class="text-button" id="clear-subscription-search">Clear filters</button></div>
+              <div class="panel-footer subscription-list-footer"><span id="subscription-search-summary" role="status"></span><div class="subscription-pagination"><label for="subscription-page-size">Rows</label><select id="subscription-page-size"><option value="25">25</option><option value="50">50</option><option value="100">100</option></select><button id="subscription-previous" class="icon-button" aria-label="Previous subscriptions page" title="Previous page"><span data-icon="chevron"></span></button><span id="subscription-page-label"></span><button id="subscription-next" class="icon-button" aria-label="Next subscriptions page" title="Next page"><span data-icon="chevron"></span></button></div></div>
+            </div>
             <article id="subscription-detail" class="subscription-detail panel" aria-labelledby="subscription-detail-name">
               <button id="back-to-subscriptions" class="text-button"><span aria-hidden="true">←</span> All subscriptions</button>
               <div class="subscription-detail-heading">
