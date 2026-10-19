@@ -94,6 +94,68 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('new-a', self.manager.snapshot['exports']['xray.json'])
         self.assertNotIn('old-a', self.manager.snapshot['exports']['xray.json'])
 
+    def test_single_provider_refresh_is_distinct_from_the_next_scheduled_refresh(self):
+        entered, release = threading.Event(), threading.Event()
+        self.releases.append(release)
+        original = self.manager.fetcher
+        def fetch(*args):
+            entered.set(); release.wait(10)
+            return original(*args)
+        self.manager.fetcher = fetch
+        identifier = self.providers[0]['id']
+        schedules = (self.manager.next_refresh, self.manager.next_check)
+        revision = self.client.get('/api/state').json()['revision']
+        self.assertEqual(self.client.post('/api/refresh', params={'provider_id': identifier}).status_code, 202)
+        self.assertTrue(entered.wait(3))
+        state = self.client.get('/api/state', params={'revision': revision}).json()
+        self.assertTrue(state['unchanged'])
+        self.assertEqual(state['refresh_provider_id'], identifier)
+        self.assertEqual(state['refresh_provider_ids'], [identifier])
+        self.assertFalse(state['refresh_scheduled'])
+        release.set(); self.manager.wait_for_idle(10)
+        self.assertEqual(self.downloads, ['a'])
+        self.assertEqual((self.manager.next_refresh, self.manager.next_check), schedules)
+        self.assertEqual(self.client.get('/api/state').json()['refresh_provider_ids'], [])
+
+        entered.clear(); release.clear()
+        self.manager.next_refresh = 0
+        with patch.object(self.manager.stop, 'wait', side_effect=[False, True]):
+            self.manager.scheduler()
+        self.assertTrue(entered.wait(3))
+        state = self.client.get('/api/state').json()
+        self.assertIsNone(state['refresh_provider_id'])
+        self.assertCountEqual(state['refresh_provider_ids'], [p['id'] for p in self.providers])
+        self.assertTrue(state['refresh_scheduled'])
+        release.set(); self.manager.wait_for_idle(10)
+        state = self.client.get('/api/state').json()
+        self.assertEqual(state['refresh_provider_ids'], [])
+        self.assertFalse(state['refresh_scheduled'])
+        refreshes = [event for event in state['history'] if event['action'] == 'refresh']
+        self.assertTrue(refreshes[0]['scheduled'])
+        self.assertFalse(refreshes[1]['scheduled'])
+
+    def test_refresh_progress_only_lists_unfinished_downloads(self):
+        entered, release = threading.Event(), threading.Event()
+        self.releases.append(release)
+        original = self.manager.fetcher
+        def fetch(*args):
+            if 'b.example' in args[0]:
+                entered.set(); release.wait(10)
+            return original(*args)
+        self.manager.fetcher = fetch
+        self.manager.fetch_workers = 1
+        revision = self.client.get('/api/state').json()['revision']
+        self.assertEqual(self.client.post('/api/refresh').status_code, 202)
+        self.assertTrue(entered.wait(3))
+        state = self.client.get('/api/state', params={'revision': revision}).json()
+        self.assertTrue(state['unchanged'])
+        self.assertIsNone(state['refresh_provider_id'])
+        self.assertEqual(state['refresh_provider_ids'], [self.providers[1]['id']])
+        self.assertEqual(state['refresh_progress'], {'done': 1, 'total': 2})
+        self.assertFalse(state['refresh_scheduled'])
+        release.set(); self.manager.wait_for_idle(10)
+        self.assertEqual(self.client.get('/api/state').json()['refresh_provider_ids'], [])
+
     def test_slow_check_cannot_stop_download_pool_from_filling_its_slots(self):
         entered, release_fetch = threading.Event(), threading.Event()
         self.releases.append(release_fetch)
@@ -246,15 +308,28 @@ class PipelineTests(unittest.TestCase):
 
     def test_restart_download_intent_only_fetches_unfinished_providers(self):
         identifier = self.providers[1]['id']
-        self.manager.jobs.put('refresh', provider_ids=[identifier], provider_id=None, reuse_recent=True)
+        self.manager.jobs.put('refresh', provider_ids=[identifier], provider_id=None, reuse_recent=True, scheduled=True)
         self.manager.jobs.put('check', provider_ids=[self.providers[0]['id']], reuse_recent=True, regular=False)
         restarted = service.Manager(self.root, self.fetcher, self.checker)
-        with patch.object(restarted.stop, 'wait', side_effect=[False, True]):
-            restarted.scheduler()
-        restarted.wait_for_idle(10)
+        entered, release = threading.Event(), threading.Event()
+        def fetch(*args):
+            entered.set(); release.wait(10)
+            return self.fetcher(*args)
+        restarted.fetcher = fetch
+        try:
+            with patch.object(restarted.stop, 'wait', side_effect=[False, True]):
+                restarted.scheduler()
+            self.assertTrue(entered.wait(3))
+            state = restarted.public_state('http://testserver')
+            self.assertIsNone(state['refresh_provider_id'])
+            self.assertEqual(state['refresh_provider_ids'], [identifier])
+            self.assertTrue(state['refresh_scheduled'])
+        finally:
+            release.set(); restarted.wait_for_idle(10)
         self.assertEqual(self.downloads, ['b'])
         self.assertFalse(restarted.jobs.items)
         self.assertEqual(restarted.snapshot['published_total'], 4)
+        self.assertTrue(next(event for event in restarted.snapshot['history'] if event['action'] == 'refresh')['scheduled'])
 
     def test_snapshot_commit_failure_keeps_selection_and_saved_check_intent(self):
         self.bodies['a'] = source(8, 'replacement')

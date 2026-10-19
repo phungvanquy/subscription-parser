@@ -99,7 +99,7 @@ function renderProgress(){
   const downloading=state.refresh_running,checking=state.check_running;
   const refreshProvider=state.providers.find(p=>p.id===state.refresh_provider_id);
   const {done:downloaded=0,total:downloadTotal=0}=state.refresh_progress||{};
-  const downloadTitle=`Refreshing ${refreshProvider?.name||'all providers'}`;
+  const downloadTitle=`${state.refresh_scheduled?'Scheduled refresh ·':'Refreshing'} ${refreshProvider?.name||'all providers'}`;
   const downloadDetail=downloadTotal?`${downloaded} of ${downloadTotal} providers downloaded. Selected servers are queued for connection checks.`:'Preparing provider downloads…';
   $('refresh-progress').hidden=!(downloading&&checking);
   if(downloading&&checking){
@@ -159,7 +159,7 @@ function render(inventoryChanged=true){
   const selected=$('protocol-filter').value;$('protocol-filter').innerHTML='<option value="">All protocols</option>'+types.map(t=>`<option value="${esc(t)}">${esc(t.toUpperCase())}</option>`).join('');if(types.includes(selected))$('protocol-filter').value=selected;
   if(inventoryChanged){renderServers();renderIssues();}
   else document.querySelectorAll('.connection-time[data-checked-at]').forEach(el=>{el.textContent=relative(el.dataset.checkedAt);});
-  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.action==='refresh'?`${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''} · Selected servers queued for checks`:`${event.published??event.servers} included / ${event.servers} nodes${event.checked?` · ${event.checked} client checks`:''}`} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
+  $('activity-rows').innerHTML=(state.history||[]).map(event=>`<div class="activity-row">${icon(event.action==='refresh'?'refresh':'network')}<div><strong>${esc(event.action==='refresh'?(event.provider_id?`${providers.find(p=>p.id===event.provider_id)?.name||'Provider'} refreshed`:event.scheduled?'Scheduled provider refresh completed':'Subscriptions refreshed'):event.action==='connection check'?'Connections checked':'Subscription configuration updated')}</strong><p>${event.action==='refresh'?`${event.fresh} sources up to date${event.cached?` · ${event.cached} cached`:''} · Selected servers queued for checks`:`${event.published??event.servers} included / ${event.servers} nodes${event.checked?` · ${event.checked} client checks`:''}`} · ${event.seconds}s</p></div><time>${date(event.at)}</time></div>`).join('')||'<div class="empty-small">Your first refresh will appear here.</div>';
   renderDevices();
   if(document.activeElement!==$('refresh-interval'))$('refresh-interval').value=state.refresh_seconds;
   if(document.activeElement!==$('check-interval'))$('check-interval').value=state.check_seconds;
@@ -219,9 +219,10 @@ function renderProviders(){
 }
 function providerCheckNote(provider,servers,working){
   const statuses=servers.flatMap(n=>Object.values(n.connectivity||{}).map(value=>value.status));
-  const fetching=state.refresh_running&&(!state.refresh_provider_id||state.refresh_provider_id===provider.id);
+  const fetching=state.refresh_running&&(state.refresh_provider_ids?.includes(provider.id)??(!state.refresh_provider_id||state.refresh_provider_id===provider.id));
   const checking=state.check_running&&(!state.check_provider_ids||state.check_provider_ids.includes(provider.id));
-  return !provider.enabled?'Paused':fetching&&checking?'Refreshing and checking…':fetching?'Refreshing…':checking?'Checking…':provider.selection_pending?'New selection awaiting checks':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
+  const refreshNote=state.refresh_scheduled?'Scheduled refresh':'Refreshing';
+  return !provider.enabled?'Paused':fetching?`${refreshNote}${checking?' and checking':''}…`:checking?'Checking…':provider.selection_pending?'New selection awaiting checks':statuses.includes('stale')?'Checks expired':statuses.includes('pending')?'Awaiting checks':!working&&provider.count?'No passing checks':'';
 }
 function providerClientCounts(servers){
   const clients=[['hiddify','Hiddify'],['mihomo','Mihomo'],['xray','Xray'],['v2board','V2Board JSON'],['v2board_uri','V2Board URI']];

@@ -798,7 +798,7 @@ def main():
                 schedules = (manager.next_refresh, manager.next_check)
                 try:
                     page.set_viewport_size({'width':1440, 'height':1000})
-                    page.locator('.nav-item[data-page=providers]').click()
+                    page.locator('.nav-item[data-page=overview]').click()
                     page.evaluate('loadState()')
                     active = page.locator('#provider-rows .provider-row').filter(has_text='Renamed provider')
                     inactive = page.locator('#provider-rows .provider-row').filter(has_text='Unchanged provider')
@@ -809,6 +809,15 @@ def main():
                     expect(page.locator('#job-progress-title')).to_have_text('Refreshing Renamed provider')
                     expect(page.locator('#job-progress-percent')).to_have_text('In progress')
                     assert page.locator('#job-progress-bar').get_attribute('aria-valuenow') is None
+                    expect(active.locator('.provider-check-note')).to_have_text('Refreshing…')
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Ready')
+                    expect(page.locator('.refresh-label')).to_have_text('Refresh all')
+                    expect(page.locator('#refresh-button.spinning')).to_have_count(0)
+                    page.evaluate('loadState(true)')
+                    expect(active.locator('.provider-check-note')).to_have_text('Refreshing…')
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Ready')
+                    page.reload()
+                    expect(page.locator('#page-title')).to_have_text('Overview')
                     expect(active.locator('.provider-check-note')).to_have_text('Refreshing…')
                     expect(inactive.locator('.provider-check-note')).to_have_text('Ready')
                     release_fetch.set()
@@ -888,6 +897,47 @@ def main():
                     expect(page.locator('#global-error')).to_contain_text('connection check failed')
                     expect(page.locator('#job-progress')).not_to_be_visible()
                 checks.append('standalone connection checks show live counts and failed work clears the progress indicator')
+
+                # The hourly job can follow a manual refresh. Its rows identify
+                # the schedule and stop refreshing as each download completes.
+                fetch_started.clear(); release_fetch.clear()
+                extra_started, release_extra = threading.Event(), threading.Event()
+                def scheduled_fetcher(*args, **kwargs):
+                    if args[0] == extra['url']:
+                        extra_started.set()
+                        if not release_extra.wait(45):
+                            raise RuntimeError('synthetic scheduled fetch was not released')
+                        return original_fetcher(*args, **kwargs)
+                    return held_fetcher(*args, **kwargs)
+                manager.fetcher = scheduled_fetcher
+                try:
+                    page.set_viewport_size({'width': 1440, 'height': 1000})
+                    page.locator('.nav-item[data-page=overview]').click()
+                    manager.next_refresh = 0
+                    with patch.object(manager.stop, 'wait', side_effect=[False, True]):
+                        manager.scheduler()
+                    assert fetch_started.wait(5) and extra_started.wait(5)
+                    page.evaluate('loadState(true)')
+                    expect(page.locator('#job-progress-title')).to_have_text('Scheduled refresh · all providers')
+                    expect(active.locator('.provider-check-note')).to_have_text('Scheduled refresh…')
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Scheduled refresh…')
+                    release_fetch.set()
+                    expect(active.locator('.provider-check-note')).not_to_have_text('Scheduled refresh…')
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Scheduled refresh…')
+                    page.reload()
+                    expect(page.locator('#job-progress-title')).to_have_text('Scheduled refresh · all providers')
+                    expect(active.locator('.provider-check-note')).not_to_have_text('Scheduled refresh…')
+                    expect(inactive.locator('.provider-check-note')).to_have_text('Scheduled refresh…')
+                    for width in (320, 390, 768, 1440):
+                        page.set_viewport_size({'width': width, 'height': 1000})
+                        assert page.evaluate('document.body.scrollWidth <= innerWidth')
+                finally:
+                    release_fetch.set(); release_extra.set()
+                    manager.wait_for_idle(10)
+                    manager.fetcher = original_fetcher
+                expect(page.locator('#job-progress')).not_to_be_visible()
+                expect(page.locator('#activity-rows')).to_contain_text('Scheduled provider refresh completed')
+                checks.append('scheduled refreshes have distinct overview labels and only unfinished providers stay refreshing after polling and reload')
                 manager.change_provider(provider_id=extra_provider['id'], delete=True)
                 page.evaluate('loadState()')
                 checks.append('single-provider refresh keeps other rows idle, fetches only its saved device and preserves global schedules')

@@ -59,6 +59,7 @@ class Manager:
         self.refresh_worker = self.check_worker = None
         self.refresh_running = self.check_running = False
         self.refresh_provider_id = None
+        self.refresh_scheduled = False
         self.check_provider_ids = None
         self.refresh_progress = {'done': 0, 'total': 0}
         self.check_phase = 'checking'
@@ -525,7 +526,8 @@ class Manager:
                             self._queue_check([identifier], reuse_recent=job.get('reuse_recent', True))
                             remaining_ids.discard(identifier)
                             job = self.jobs.put('refresh', provider_ids=sorted(remaining_ids), provider_id=selected,
-                                                reuse_recent=job.get('reuse_recent', True))
+                                                reuse_recent=job.get('reuse_recent', True),
+                                                scheduled=job.get('scheduled', False))
                             self.refresh_progress['done'] += 1
                     fill()
             with self.publish_guard, self.guard:
@@ -534,7 +536,8 @@ class Manager:
                 last_download = max((stamp for stamp in [self.snapshot.get('last_download'),
                     *(s.get('fetched_at') for s in statuses.values())] if stamp), default=None)
                 event = {'at': generated, 'seconds': round(time.monotonic() - started, 2),
-                         'action': 'refresh', 'servers': sum(s.get('count', 0) for s in statuses.values()),
+                         'action': 'refresh', 'scheduled': self.refresh_scheduled,
+                         'servers': sum(s.get('count', 0) for s in statuses.values()),
                          'published': self.snapshot.get('published_total', 0), 'checked': 0,
                          'fresh': sum(s.get('status') == 'fresh' for s in statuses.values()),
                          'cached': sum(s.get('status') == 'cached' for s in statuses.values())}
@@ -561,6 +564,7 @@ class Manager:
             with self.guard:
                 self.refresh_running = False
                 self.refresh_provider_id = None
+                self.refresh_scheduled = False
                 self._sync_busy()
             self._clean_selections()
             if autostart and not self.stop.is_set():
@@ -791,7 +795,7 @@ class Manager:
                 with self.guard:
                     self._sync_busy()
 
-    def begin_refresh(self, selected=None, *, reuse_recent=False):
+    def begin_refresh(self, selected=None, *, reuse_recent=False, scheduled=False):
         with self.guard:
             if self.refresh_running or (self.busy and not self.check_running):
                 raise Busy('a provider refresh is already running')
@@ -802,11 +806,12 @@ class Manager:
                 if not provider['enabled']:
                     raise common.SubscriptionError('provider is paused; enable it before refreshing')
             job = self.jobs.put('refresh', provider_ids=[selected] if selected else None,
-                                provider_id=selected, reuse_recent=reuse_recent)
+                                provider_id=selected, reuse_recent=reuse_recent, scheduled=scheduled)
             self._start_refresh(job)
 
     def _start_refresh(self, job):
         self.refresh_running, self.refresh_provider_id = True, job.get('provider_id')
+        self.refresh_scheduled = job.get('scheduled', False)
         self.refresh_progress = {'done': 0, 'total': 0}
         if not self.check_running:
             self.check_progress = {'done': 0, 'total': 0}
@@ -1040,7 +1045,7 @@ class Manager:
                         if job and job.get('retry_at', 0) <= now:
                             self._start_refresh(job)
                         elif not job and now >= self.next_refresh:
-                            self.begin_refresh(reuse_recent=True)
+                            self.begin_refresh(reuse_recent=True, scheduled=True)
                     if not self.check_running and (not self.busy or self.refresh_running):
                         job = self.jobs.items.get('check')
                         if now >= self.next_check and not job:
@@ -1058,6 +1063,10 @@ class Manager:
             config = self.store.config()
             sources_key = self.sources_key(config)
             subscriptions = self.public_subscriptions(base_url, ensure=False, sources_key=sources_key)
+            refresh_job = self.jobs.items.get('refresh') if self.refresh_running else None
+            refresh_ids = refresh_job.get('provider_ids') if refresh_job else []
+            refreshing = [p['id'] for p in config['providers'] if p['enabled']
+                          and (refresh_ids is None or p['id'] in refresh_ids)]
             providers = []
             for provider in config['providers']:
                 status = self.provider_statuses.get(provider['id'], {'status': 'pending', 'count': 0, 'protocols': {}})
@@ -1088,6 +1097,7 @@ class Manager:
                 'refresh_running': self.refresh_running, 'check_running': self.check_running,
                 'check_phase': self.check_phase if self.check_running else None,
                 'refresh_provider_id': self.refresh_provider_id, 'check_provider_ids': self.check_provider_ids,
+                'refresh_provider_ids': refreshing, 'refresh_scheduled': self.refresh_scheduled,
                 'refresh_progress': dict(self.refresh_progress), 'check_queued': 'check' in self.jobs.items,
                 "refresh_seconds": config["refresh_seconds"], "next_refresh": self.next_refresh,
                 "check_seconds": config['check_seconds'], "next_check": self.next_check,

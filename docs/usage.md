@@ -76,6 +76,11 @@ their scheduled refreshes are not postponed. Identical configurations shared by
 multiple providers are checked once; each distinct native configuration keeps
 its own result. **Refresh all** downloads all enabled providers and queues their checks independently.
 
+Each row shows refresh progress only while that provider's download is unfinished.
+Automatic downloads show **Scheduled refresh…** and a separate scheduled label in
+the progress banner and activity history. A scheduled run can follow a manual
+provider refresh when its regular interval becomes due.
+
 A failed or invalid download can reuse the last successful response for the
 same URL, user agent, and device assignment/revision. The provider is marked
 **Cached**. Its nodes still need recent passing connection checks to be published.

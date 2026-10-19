@@ -119,6 +119,12 @@ means saved check intent exists, including a running or retrying batch. A provid
 `selection_pending` indicates its latest selection is awaiting publication.
 The existing `busy` field means either job or a configuration operation is active;
 `busy_action` can now be `fetching_and_checking`.
+`refresh_provider_ids` lists only enabled providers whose downloads are unfinished,
+including queued downloads; it is empty when no download is running. Use this list
+for row indicators, including during retries of a partially completed full refresh.
+`refresh_provider_id` retains the requested scope (null for a full refresh).
+`refresh_scheduled` identifies a scheduled download, including its retries; refresh
+history events retain the same flag as `scheduled`.
 
 A refresh can start during checks, and checks can start during a refresh.
 A second job of the same kind returns HTTP 409. Configuration changes and fetch
