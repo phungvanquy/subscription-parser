@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import urljoin
 import pyotp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -32,6 +33,344 @@ def read_clipboard(page):
 
 def provider_details(row):
     return row.locator('xpath=following-sibling::tr[1]')
+
+
+def check_server_details(page, checks):
+    """Inspect actual cached settings without leaving the filtered library."""
+    first = page.locator('#server-rows .server-open').first
+    first.focus()
+    page.keyboard.press('Enter')
+    dialog = page.locator('#server-dialog')
+    expect(dialog).to_be_visible()
+    expect(page.locator('#server-detail-name')).to_have_text('Berlin')
+    expect(page.locator('#server-detail-fields')).to_contain_text('example.org')
+    expect(page.locator('#server-detail-position')).to_have_text('1 of 2 servers')
+    expect(page.locator('#server-detail-previous')).to_be_disabled()
+    expect(page.locator('#server-config-text')).to_contain_text('01234567-89ab-4cde-8fab-0123456789ab')
+    original = page.locator('#server-config-text').inner_text()
+    page.locator('#server-config-copy').click()
+    expect(page.locator('#server-config-feedback')).to_have_text('Configuration copied')
+    assert read_clipboard(page) == original
+    with page.expect_download() as download:
+        page.locator('#server-config-download').click()
+    assert Path(download.value.path()).read_text() == original
+    page.locator('#server-config-format').select_option('mihomo')
+    expect(page.locator('#server-config-text')).to_contain_text('proxies:')
+    page.evaluate('loadState()')
+    expect(page.locator('#server-config-format')).to_have_value('mihomo')
+    page.locator('#server-detail-next').click()
+    expect(page.locator('#server-detail-name')).to_have_text('Tokyo')
+    expect(page.locator('#server-config-text')).to_contain_text('synthetic-password')
+    expect(page.locator('#server-detail-next')).to_be_disabled()
+    page.locator('#server-detail-previous').click()
+    expect(page.locator('#server-config-text')).to_have_text(original)
+    checks.append('server inspector shows original and client formats; clipboard, download, navigation and polling work')
+    for width in (1440, 768, 390, 320):
+        page.set_viewport_size({'width': width, 'height': 900 if width > 640 else 844})
+        assert dialog.evaluate('el => el.scrollWidth <= el.clientWidth')
+        assert page.locator('#server-detail-body').evaluate('el => el.scrollWidth <= el.clientWidth')
+        expect(page.locator('#server-detail-next')).to_be_in_viewport()
+        if os.environ.get('PARSER_TEST_SCREENSHOTS') and width in (1440, 390):
+            page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS']+f'/server-detail-{width}.png')
+    page.keyboard.press('Escape')
+    expect(dialog).not_to_be_visible()
+    expect(first).to_be_focused()
+    expect(page.locator('#server-config-text')).to_have_text('')
+    page.locator('#server-search').fill('Tokyo')
+    page.locator('#server-rows .server-open').click()
+    expect(page.locator('#server-detail-position')).to_have_text('1 of 1 servers')
+    expect(page.locator('#server-detail-previous')).to_be_disabled()
+    expect(page.locator('#server-detail-next')).to_be_disabled()
+    page.locator('[data-close=server-dialog]').click()
+    expect(page.locator('#server-search')).to_have_value('Tokyo')
+    page.locator('#server-search').fill('')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    checks.append('server inspector fits 320–1440px, restores keyboard focus and preserves filters')
+    pattern = '**/api/servers/*'
+    def unavailable(route):
+        route.fulfill(status=404, json={'detail': 'Server no longer available'})
+    page.route(pattern, unavailable)
+    first.click()
+    expect(page.locator('#server-detail-message')).to_have_text('Server no longer available')
+    expect(page.locator('#server-detail-content')).not_to_be_visible()
+    page.unroute(pattern, unavailable)
+    page.locator('#server-detail-retry').click()
+    expect(page.locator('#server-config-text')).to_have_text(original)
+    page.keyboard.press('Escape')
+    pending = []
+    def delayed(route):
+        pending.append(route)
+    page.route(pattern, delayed)
+    first.click()
+    page.wait_for_timeout(100)
+    page.locator('#server-detail-next').click()
+    page.wait_for_timeout(100)
+    assert len(pending) == 2
+    pending[1].fulfill(response=pending[1].fetch())
+    expect(page.locator('#server-config-text')).to_contain_text('synthetic-password')
+    pending[0].fulfill(response=pending[0].fetch())
+    expect(page.locator('#server-detail-name')).to_have_text('Tokyo')
+    expect(page.locator('#server-config-text')).to_contain_text('synthetic-password')
+    page.unroute(pattern, delayed)
+    page.keyboard.press('Escape')
+    checks.append('server inspector handles unavailable servers, retries and out-of-order requests safely')
+
+
+def check_subscription_server_policy(page, manager, checks):
+    """Exercise persistent selection, endpoint edits, resets and explicit relinking."""
+    original_fetcher = manager.fetcher
+    page.locator('.nav-item[data-page=exports]').click()
+    page.locator('#add-subscription').click()
+    page.locator('#subscription-name').fill('Custom endpoint test')
+    page.locator('#subscription-all').check()
+    page.locator('#save-subscription').click()
+    expect(page.locator('#subscription-dialog')).not_to_be_visible()
+    expect(page.locator('#subscription-detail-name')).to_have_text('Custom endpoint test')
+    identifier = page.evaluate('selectedSubscription')
+    token = manager.store.subscription(identifier)['token']
+    url = urljoin(page.url, '/sub/' + token + '/hiddify.json')
+    baseline = manager.snapshot['exports']['hiddify.json']
+    try:
+        page.locator('#customize-subscription').click()
+        expect(page.locator('#policy-content')).to_be_visible()
+        page.locator('#policy-mode').select_option('selected')
+        page.locator('#policy-available-search').fill('Berlin')
+        page.locator('.policy-available-row').filter(has_text='Berlin').first.locator('[data-add]').click()
+        record = page.locator('.policy-record').first
+        editor = page.locator('.policy-record-editor')
+        editor.locator('[data-field=address]').fill('relay.example.org')
+        editor.locator('[data-field=port]').fill('8443')
+        editor.locator('[data-field=name]').fill('Custom <Berlin>')
+        page.evaluate('loadState()')
+        expect(editor.locator('[data-field=address]')).to_have_value('relay.example.org')
+        for width in (1440, 390, 320):
+            page.set_viewport_size({'width': width, 'height': 1000 if width > 640 else 844})
+            assert page.locator('#policy-dialog').evaluate('el => el.scrollWidth <= el.clientWidth')
+            assert record.evaluate('el => el.scrollWidth <= el.clientWidth')
+            expect(page.locator('#policy-save')).to_be_in_viewport()
+            if os.environ.get('PARSER_TEST_SCREENSHOTS') and width in (1440, 390):
+                page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS'] + f'/server-policy-{width}.png')
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert page.request.get(url).status == 503
+        manager.begin_check(reuse_recent=True); manager.wait_for_idle(15)
+        page.evaluate('loadState()')
+        expect(page.locator('#subscription-published')).to_have_text('1')
+        nodes = page.request.get(url).json()['outbounds']
+        assert len(nodes) == 1 and nodes[0]['server'] == 'relay.example.org' and nodes[0]['server_port'] == 8443
+        assert 'Custom <Berlin>' in nodes[0]['tag']
+        assert manager.snapshot['exports']['hiddify.json'] == baseline
+        saved_id = manager.store.server_policy(identifier)['records'][0]['id']
+        page.locator('#customize-subscription').click()
+        expect(page.locator('.policy-record')).to_have_count(1)
+        page.locator('.policy-record [data-edit]').click()
+        expect(editor).to_contain_text('Provider: example.org')
+        page.locator('[data-reset=address]').click()
+        expect(page.locator('[data-field=address]')).to_have_value('')
+        page.keyboard.press('Escape')
+        page.locator('#customize-subscription').click()
+        page.locator('.policy-record [data-edit]').click()
+        expect(page.locator('[data-field=address]')).to_have_value('relay.example.org')
+        page.keyboard.press('Escape')
+        checks.append('subscription server editor preserves drafts during polling, resets fields and fits 320–1440px')
+
+        def changed_source(*args):
+            body, metadata = original_fetcher(*args)
+            document = json.loads(body)
+            document[0]['outbounds'][0]['server_port'] = 444
+            return json.dumps(document).encode(), metadata
+        manager.fetcher = changed_source
+        manager.refresh()
+        page.evaluate('loadState()')
+        page.locator('#customize-subscription').click()
+        expect(page.locator('.policy-record .status-pill')).to_have_text('Source unavailable')
+        page.locator('.policy-record [data-edit]').click()
+        expect(page.locator('[data-field=address]')).to_have_value('relay.example.org')
+        page.locator('.policy-suggestion').first.click()
+        expect(editor).to_contain_text('Provider: 444')
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        manager.begin_check(reuse_recent=True); manager.wait_for_idle(15)
+        assert manager.store.server_policy(identifier)['records'][0]['id'] == saved_id
+        nodes = page.request.get(url).json()['outbounds']
+        assert nodes[0]['server'] == 'relay.example.org' and nodes[0]['server_port'] == 8443
+        page.evaluate('loadState()')
+        page.locator('#customize-subscription').click()
+        expect(page.locator('.policy-record')).to_have_count(1)
+        page.locator('[data-selected]').uncheck()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert page.request.get(url).status == 503
+        assert manager.store.server_policy(identifier)['records'][0]['address'] == 'relay.example.org'
+        checks.append('custom endpoints publish only after checks; changed sources require relinking and retain edits when deselected')
+    finally:
+        manager.fetcher = original_fetcher
+        if page.locator('#policy-dialog').is_visible():
+            page.keyboard.press('Escape')
+        manager.change_subscription(identifier=identifier, delete=True)
+        manager.refresh()
+        page.evaluate('loadState()')
+        page.evaluate('showSubscriptionList()')
+
+
+def check_large_server_policy(page, checks):
+    """Bound the rendered list and keep drafts across filters, pages and bulk actions."""
+    page.locator('.nav-item[data-page=exports]').click()
+    page.evaluate("showSubscription('default')")
+    records = []
+    for index in range(1000):
+        source = {'name': f'Server {index:04} <private>', 'protocol': 'vless',
+                  'address': f'server-{index:04}.example.org', 'port': 443}
+        records.append({'id': f'saved-{index}', 'provider_id': f'provider-{index % 4}',
+            'provider_name': f'Provider {index % 4}', 'source_identity': f'{index:064x}',
+            'source': source, 'selected': index % 5 != 0, 'address': None, 'port': None,
+            'name': None, 'source_present': index % 4 != 0,
+            'status': 'unavailable' if index % 4 == 0 else 'working', 'checks': {}, 'suggestions': []})
+    candidates = [{'provider_id': 'provider-1', 'provider_name': 'Provider 1',
+                   'source_identity': f'{index + 2000:064x}',
+                   'source': {'name': f'Available {index:03}', 'protocol': 'vless',
+                              'address': f'available-{index}.example.org', 'port': 443}}
+                  for index in range(50)]
+    fixture = {'revision': 0, 'all_servers': False, 'records': records, 'available': candidates,
+               'available_total': len(candidates), 'offset': 0, 'limit': 50, 'max_records': 1000}
+    writes = []
+    fail_save = [False]
+    def response(route):
+        if route.request.method == 'PUT':
+            writes.append(route.request.post_data_json)
+            if fail_save[0]:
+                route.fulfill(status=409, json={'detail': 'Wait for the current connection check'})
+            else:
+                route.fulfill(json={'revision': 1})
+        else:
+            route.fulfill(json=fixture)
+    pattern = '**/api/subscriptions/default/servers*'
+    page.route(pattern, response)
+    try:
+        page.locator('#customize-subscription').click()
+        rows = page.locator('.policy-record')
+        expect(rows).to_have_count(25)
+        expect(page.locator('#policy-saved-count')).to_have_text('1000 saved · 800 selected')
+        expect(page.locator('.policy-record-editor')).to_have_count(0)
+        expect(page.locator('#policy-available-panel')).not_to_be_visible()
+        assert len(page.locator('#policy-records input').all()) == 25
+        page.locator('#policy-saved-page-select').select_option('39')
+        expect(rows.first).to_contain_text('Server 0975')
+        page.locator('#policy-saved-previous').click()
+        expect(rows.first).to_contain_text('Server 0950')
+        page.locator('#policy-saved-page-select').select_option('0')
+        rows.nth(1).locator('[data-edit]').click()
+        page.locator('[data-field=address]').fill('my-relay.example.org')
+        page.locator('[data-field=port]').fill('8443')
+        page.locator('[data-field=name]').fill('My <saved> server')
+        page.evaluate('loadState()')
+        expect(page.locator('[data-field=address]')).to_have_value('my-relay.example.org')
+        page.locator('#policy-saved-next').click()
+        expect(page.locator('.policy-record-editor')).to_have_count(0)
+        page.locator('#policy-saved-search').fill('my-relay')
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('My <saved> server')
+        rows.first.locator('[data-edit]').click()
+        expect(page.locator('[data-field=port]')).to_have_value('8443')
+        page.locator('[data-done]').click()
+        expect(page.locator('.policy-record-editor')).to_have_count(0)
+        expect(rows.first.locator('[data-edit]')).to_be_focused()
+        page.locator('#policy-saved-search').fill('')
+        page.locator('#policy-provider-filter').select_option('provider-0')
+        expect(page.locator('#policy-exclude-matches')).to_have_text('Exclude 250 matches')
+        page.locator('#policy-exclude-matches').click()
+        expect(page.locator('#policy-saved-count')).to_have_text('1000 saved · 600 selected')
+        page.locator('#policy-status-filter').select_option('unavailable')
+        expect(page.locator('#policy-saved-page')).to_contain_text('of 250 matches')
+        page.locator('#policy-include-matches').click()
+        expect(page.locator('#policy-saved-count')).to_have_text('1000 saved · 850 selected')
+        page.locator('#policy-provider-filter').select_option('')
+        page.locator('#policy-status-filter').select_option('overrides')
+        expect(rows).to_have_count(1)
+        expect(rows.first).to_contain_text('My <saved> server')
+        page.locator('#policy-status-filter').select_option('')
+        page.locator('#policy-mode').select_option('all')
+        expect(page.locator('#policy-bulk-selection')).not_to_be_visible()
+        expect(page.locator('[data-selected]')).to_have_count(0)
+        page.locator('#policy-mode').select_option('selected')
+        page.locator('#policy-tab-saved').focus()
+        page.keyboard.press('ArrowRight')
+        expect(page.locator('#policy-tab-available')).to_be_focused()
+        expect(page.locator('#policy-available-panel')).to_be_visible()
+        expect(page.locator('#policy-add-page')).to_be_disabled()
+        page.keyboard.press('Home')
+        expect(page.locator('#policy-tab-saved')).to_be_focused()
+        expect(page.locator('#policy-saved-panel')).to_be_visible()
+        checks.append('1000 saved servers render only 25 compact rows; filters, page jumps and scoped bulk actions preserve edits')
+
+        for width in (1440, 768, 390, 320):
+            page.set_viewport_size({'width': width, 'height': 1000 if width > 640 else 844})
+            page.locator('#policy-tab-saved').click()
+            dialog = page.locator('#policy-dialog')
+            assert dialog.evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            assert page.locator('.policy-editor-body').evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            heights = rows.evaluate_all('rows => rows.map(row => row.getBoundingClientRect().height)')
+            assert max(heights) <= (132 if width <= 640 else 85), (width, heights)
+            expect(page.locator('#policy-save')).to_be_in_viewport()
+            page.locator('.policy-editor-body').evaluate('el => el.scrollTop = el.scrollHeight')
+            expect(page.locator('#policy-tab-available')).to_be_in_viewport()
+            expect(page.locator('#policy-saved-search')).to_be_in_viewport()
+            expect(page.locator('#policy-saved-next')).to_be_in_viewport()
+            if os.environ.get('PARSER_TEST_SCREENSHOTS') and width in (1440, 390):
+                page.locator('#policy-saved-panel').scroll_into_view_if_needed()
+                page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS'] + f'/server-policy-1000-{width}.png')
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.locator('#policy-saved-page-select').select_option('0')
+        rows.nth(1).locator('[data-edit]').click()
+        page.locator('[data-field=port]').fill('70000')
+        page.locator('#policy-tab-available').click()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-saved-panel')).to_be_visible()
+        expect(page.locator('#policy-error')).to_contain_text('between 1 and 65535')
+        page.locator('[data-field=port]').click()
+        page.locator('#policy-saved-next').click()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-error')).to_contain_text('between 1 and 65535')
+        expect(page.locator('[data-field=port]')).to_have_value('70000')
+        page.locator('[data-field=port]').fill('8443')
+        fail_save[0] = True
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-error')).to_contain_text('Wait for the current connection check')
+        expect(page.locator('[data-field=address]')).to_have_value('my-relay.example.org')
+        fail_save[0] = False
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        saved = writes[-1]['records']
+        assert len(saved) == 1000 and sum(row['selected'] for row in saved) == 850
+        assert saved[1]['address'] == 'my-relay.example.org' and saved[1]['port'] == 8443
+        assert saved[1]['name'] == 'My <saved> server'
+        assert all(row['selected'] for index, row in enumerate(saved) if index % 4 == 0)
+        assert all(row['selected'] == records[index]['selected'] for index, row in enumerate(saved) if index % 4 != 0)
+        expect(page.locator('#policy-records')).to_be_empty()
+        checks.append('large-list editor fits 320–1440px, keeps paging controls visible and retains drafts after invalid ports or failed saves')
+
+        fixture['records'] = []
+        page.locator('#customize-subscription').click()
+        expect(page.locator('#policy-available-panel')).to_be_visible()
+        page.locator('#policy-add-page').click()
+        expect(page.locator('#policy-saved-panel')).to_be_visible()
+        expect(rows).to_have_count(25)
+        expect(page.locator('#policy-saved-count')).to_have_text('50 saved · 50 selected')
+        page.locator('#policy-tab-available').click()
+        expect(page.locator('.policy-available-row')).to_have_count(0)
+        expect(page.locator('#policy-add-page')).to_be_disabled()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert len(writes[-1]['records']) == 50
+        assert len({row['source_identity'] for row in writes[-1]['records']}) == 50
+        checks.append('available-server page can be added in one action without duplicate bindings or exceeding the saved-server limit')
+    finally:
+        if page.locator('#policy-dialog').is_visible():
+            page.keyboard.press('Escape')
+        page.unroute(pattern, response)
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.evaluate('showSubscriptionList()')
 
 
 def check_large_provider_list(page, checks):
@@ -471,6 +810,7 @@ def main():
                 expect(page.locator('#protocol-filter')).not_to_contain_text('LOOPBACK')
                 expect(page.locator('#connection-summary')).to_contain_text('0 excluded')
                 assert len(seen)==2
+                check_server_details(page, checks)
                 checks.append('cached connection checks publish passing nodes without another provider fetch')
                 page.locator('.nav-item[data-page=overview]').click()
                 expect(page.locator('#stat-servers')).to_have_text('2', timeout=15000)
@@ -803,6 +1143,8 @@ def main():
                 checks.append('independent subscription links, rotation, deletion, safe names and mobile controls without extra fetches')
                 checks.append('mobile list and detail navigation, keyboard selection and searchable provider choices')
                 check_large_subscription_list(page, checks)
+                check_subscription_server_policy(page, manager, checks)
+                check_large_server_policy(page, checks)
 
                 page.locator('.nav-item[data-page=providers]').click()
                 limited_row = page.locator('#provider-rows .provider-row').filter(has_text='Demo 2')

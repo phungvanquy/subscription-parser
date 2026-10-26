@@ -17,12 +17,20 @@ PASSWORD = 'synthetic-proxy-password'
 
 
 @contextmanager
-def fixture(folder, core, port=0, *, protocol='vless'):
+def fixture(folder, core, port=0, *, protocol='vless', xhttp=None, reality=False, salamander=None, tls=False):
+    if tls and reality:
+        raise ValueError('TLS and REALITY fixtures are mutually exclusive')
+    if (xhttp is not None or reality) and protocol != 'vless':
+        raise ValueError('XHTTP/REALITY fixtures require VLESS')
+    if salamander is not None and protocol != 'hysteria2':
+        raise ValueError('Salamander fixtures require Hysteria2')
     settings = {
         'vless': {'decryption': 'none', 'clients': [{'id': UUID}]},
         'vmess': {'clients': [{'id': UUID, 'alterId': 0}]},
         'shadowsocks': {'method': 'aes-128-gcm', 'password': PASSWORD, 'network': 'tcp'},
         'trojan': {'clients': [{'password': PASSWORD}]},
+        # The pinned Xray core reads Hysteria inbound users from "clients".
+        'hysteria2': {'version': 2, 'clients': [{'auth': PASSWORD}]},
     }[protocol]
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -59,12 +67,42 @@ def fixture(folder, core, port=0, *, protocol='vless'):
         node['password'] = PASSWORD
     if protocol == 'shadowsocks':
         node['method'] = 'aes-128-gcm'
-    if protocol == 'trojan':
+    if protocol in {'trojan', 'hysteria2'} or tls:
         inbound['streamSettings'] = {'security': 'tls', 'tlsSettings': {
             'certificates': [{'certificateFile': str(certificate), 'keyFile': str(key)}]}}
         node['tls'] = {'enabled': True, 'server_name': 'localhost'}
+    if protocol == 'hysteria2':
+        inbound['protocol'] = 'hysteria'
+        inbound['streamSettings'].update(network='hysteria', hysteriaSettings={'version': 2})
+        inbound['streamSettings']['tlsSettings']['alpn'] = ['h3']
+        node['tls']['alpn'] = ['h3']
+        if salamander is not None:
+            inbound['streamSettings']['finalmask'] = {
+                'udp': [{'type': 'salamander', 'settings': {'password': salamander}}]}
+            node['obfs'] = {'type': 'salamander', 'password': salamander}
+    if xhttp is not None:
+        inbound.setdefault('streamSettings', {}).update(network='xhttp', xhttpSettings=xhttp)
+        node['transport'] = {'type': 'xhttp', **xhttp}
+    if reality:
+        keys = dict(line.split(': ', 1) for line in subprocess.check_output(
+            [str(core), 'x25519'], text=True, timeout=5).splitlines() if ': ' in line)
+        inbound.setdefault('streamSettings', {}).update(security='reality', realitySettings={
+            'target': f'127.0.0.1:{server.server_port}', 'serverNames': ['localhost'],
+            'privateKey': keys['PrivateKey'], 'shortIds': ['01ab']})
+        node['tls'] = {'enabled': True, 'server_name': 'localhost',
+                       'utls': {'enabled': True, 'fingerprint': 'firefox'},
+                       'reality': {'enabled': True, 'public_key': keys['Password (PublicKey)'], 'short_id': '01ab'}}
     document = {'log': {'loglevel': 'none'}, 'inbounds': [inbound],
         'outbounds': [{'protocol': 'freedom', 'settings': {'redirect': f'127.0.0.1:{server.server_port}'}}]}
+    readiness_port = port
+    if protocol == 'hysteria2':
+        # Hysteria2 listens on UDP. A separate loopback TCP inbound tells us
+        # when the process has finished starting all its listeners.
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            readiness_port = listener.getsockname()[1]
+        document['inbounds'].append({'listen': '127.0.0.1', 'port': readiness_port,
+                                     'protocol': 'http', 'settings': {}})
     config = folder / 'test-server.json'
     config.write_text(json.dumps(document)); config.chmod(0o600)
     process = None
@@ -76,7 +114,7 @@ def fixture(folder, core, port=0, *, protocol='vless'):
             if process.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError(f'local {protocol} fixture did not start')
             try:
-                with socket.create_connection(('127.0.0.1', port), timeout=.1):
+                with socket.create_connection(('127.0.0.1', readiness_port), timeout=.1):
                     break
             except OSError:
                 time.sleep(.05)

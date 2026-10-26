@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import os
+import re
 from pathlib import Path
 import threading
 from typing import Literal
@@ -10,13 +11,13 @@ from urllib.parse import urlsplit
 
 from starlette.concurrency import run_in_threadpool
 
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import common, publication
+from . import common, publication, server_policy
 from .config import MAX_PROVIDERS, MAX_PROVIDER_SERVERS, admin_key
 from .auth import Auth, AuthError, SESSION_SECONDS
 from .fetch import bounded_fetch_subscription
@@ -73,6 +74,25 @@ class Subscription(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     all_providers: bool = False
     provider_ids: list[str] = Field(default_factory=list, max_length=MAX_PROVIDERS)
+
+
+class ServerSelection(BaseModel):
+    model_config = {'extra': 'forbid'}
+    id: str | None = Field(default=None, min_length=1, max_length=100)
+    provider_id: str = Field(min_length=1, max_length=100)
+    source_identity: str = Field(pattern=r'^[0-9a-f]{64}$')
+    selected: bool = True
+    name: str | None = Field(default=None, max_length=200)
+    address: str | None = Field(default=None, max_length=253)
+    port: int | None = Field(default=None, strict=True, ge=1, le=65535)
+    relink: bool = False
+
+
+class ServerPolicy(BaseModel):
+    model_config = {'extra': 'forbid'}
+    revision: int = Field(strict=True, ge=0)
+    all_servers: bool = True
+    records: list[ServerSelection] = Field(max_length=server_policy.MAX_RECORDS)
 
 
 def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscription, checker=None):
@@ -144,8 +164,10 @@ def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscripti
                 response = auth_error_response(error)
                 response.headers['Cache-Control'] = 'no-store'
                 return response
+        body_limit = (1048576 if re.fullmatch(r'/api/subscriptions/[^/]+/servers', request.url.path)
+                      and request.method == 'PUT' else 16384)
         try:
-            if int(request.headers.get("content-length", "0")) > 16384:
+            if int(request.headers.get("content-length", "0")) > body_limit:
                 return JSONResponse({"detail": "request too large"}, status_code=413)
         except ValueError:
             return JSONResponse({"detail": "invalid request size"}, status_code=400)
@@ -153,7 +175,7 @@ def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscripti
             body = b""
             async for chunk in request.stream():
                 body += chunk
-                if len(body) > 16384:
+                if len(body) > body_limit:
                     return JSONResponse({"detail": "request too large"}, status_code=413)
             request._body = body
             origin = request.headers.get("origin")
@@ -237,6 +259,13 @@ def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscripti
     def state(request: Request, revision: str | None = None):
         return manager.public_state(public_url or str(request.base_url), revision)
 
+    @app.get('/api/servers/{identifier}', dependencies=[Depends(admin)])
+    def server_detail(identifier: str):
+        detail = manager.server_detail(identifier)
+        if detail is None:
+            raise HTTPException(404, 'This server is no longer available. Refresh the server library and try again.')
+        return detail
+
     @app.get('/api/logs', dependencies=[Depends(admin)])
     def logs(level: Literal['all', 'warning', 'error'] = 'all'):
         return manager.logs.recent(level)
@@ -317,6 +346,15 @@ def create_app(root=None, start_scheduler=True, fetcher=bounded_fetch_subscripti
     @app.put('/api/subscriptions/{identifier}', dependencies=[Depends(admin)])
     def edit_subscription(identifier: str, body: Subscription):
         return {'id': manager.change_subscription(body.model_dump(), identifier)}
+
+    @app.get('/api/subscriptions/{identifier}/servers', dependencies=[Depends(admin)])
+    def subscription_servers(identifier: str, q: str = Query(default='', max_length=200),
+                             offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
+        return manager.subscription_servers(identifier, q, offset, limit)
+
+    @app.put('/api/subscriptions/{identifier}/servers', dependencies=[Depends(admin)])
+    def edit_subscription_servers(identifier: str, body: ServerPolicy):
+        return manager.change_subscription_servers(identifier, body.model_dump())
 
     @app.delete('/api/subscriptions/{identifier}', dependencies=[Depends(admin)])
     def delete_subscription(identifier: str):

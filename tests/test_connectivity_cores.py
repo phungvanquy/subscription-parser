@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.connectivity_fixture import fixture
-from subscription_parser import connectivity as c, protocols
+from subscription_parser import connectivity as c, protocols, server_policy
 
 CORES = Path(os.environ.get('PARSER_TOOLS_DIR', '/opt/client-cores'))
 
@@ -57,6 +57,22 @@ class RealCoreTests(unittest.TestCase):
                     value = self.probe(self.node(server_port=closed.getsockname()[1]), core)
                     self.assertEqual(value['status'], 'failed', value)
         self.assertEqual(self.local['server'].requests, 0)
+
+    def test_custom_address_and_port_reach_the_configured_endpoint(self):
+        source = self.node()
+        modified = server_policy.customize(source, {'address': 'localhost', 'name': 'Customized'})
+        for core in c.CORES:
+            with self.subTest(core=core):
+                value = self.probe(modified, core)
+                self.assertEqual(value['status'], 'passed', value)
+        self.assertEqual(self.local['server'].requests, len(c.CORES))
+        with socket.socket() as closed:
+            closed.bind(('127.0.0.1', 0))
+            unavailable = server_policy.customize(source, {'port': closed.getsockname()[1]})
+            for core in c.CORES:
+                with self.subTest(core=core), patch.object(c, 'REQUEST_TIMEOUT', 1):
+                    self.assertEqual(self.probe(unavailable, core)['status'], 'failed')
+        self.assertEqual(self.local['server'].requests, len(c.CORES))
 
     def test_wrong_credentials_fail_actual_handshake(self):
         credential = {'uuid': '11234567-89ab-4cde-8fab-0123456789ab'} if 'uuid' in self.local['node'] else {

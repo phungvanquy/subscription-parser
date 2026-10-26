@@ -241,7 +241,8 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(upgraded.config(), config)
         self.assertEqual(upgraded.hwids(), devices)
         self.assertEqual(upgraded.subscriptions(), [{'id': 'default', 'name': 'All providers', 'token': token,
-                                                    'all_providers': True, 'provider_ids': []}])
+                                                     'all_providers': True, 'provider_ids': [],
+                                                     'server_policy': {'revision': 0, 'all_servers': True}}])
         with upgraded.connection() as connection:
             self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], SCHEMA_VERSION)
             self.assertEqual(connection.execute('PRAGMA foreign_key_check').fetchall(), [])

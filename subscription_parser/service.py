@@ -14,7 +14,7 @@ import threading
 import time
 
 
-from . import common, connectivity, protocols, publication, pipeline
+from . import common, connectivity, protocols, publication, pipeline, server_details, server_policy
 from .config import MAX_PROVIDERS, env_int
 from .fetch import bounded_fetch_subscription
 from .debug_log import DebugLog
@@ -28,6 +28,7 @@ class Busy(common.SubscriptionError):
 
 class Manager:
     def __init__(self, root: Path, fetcher=bounded_fetch_subscription, checker=None):
+        self.adapter_policy = protocols.adapter_policy()
         self.store = Store(root)
         self.logs = DebugLog(self.store.root)
         self.fetcher = fetcher
@@ -130,6 +131,17 @@ class Manager:
             self.snapshot['active_selections'] = active
             common.atomic_write(self.snapshot_path, common.json_text(self.snapshot))
         self.provider_statuses = dict(self.snapshot.get('providers', {}))
+        if any(subscription.get('server_policy', {}).get('revision')
+               and publication.scope_key(subscription) not in self.snapshot.get('publications', {})
+               for subscription in self.store.subscriptions()):
+            # Recover a crash after the database commit but before the job file
+            # or publication could be written. The database remains authoritative.
+            self._queue_check(reuse_recent=True)
+            self.next_check = min(self.next_check, time.time())
+        if (self.snapshot.get('generated_at')
+                and self.snapshot.get('adapter_policy') != self.adapter_policy):
+            self._queue_check(reuse_recent=True)
+            self.next_check = min(self.next_check, time.time())
 
     def pin_selection(self, provider, cache, parsed):
         """An immutable response + draw, referenced by the atomic snapshot."""
@@ -312,22 +324,44 @@ class Manager:
     def prepare_scopes(self, config, by_provider, statuses, *, namespace='active'):
         enabled = [p for p in config['providers'] if p['enabled']]
         selections = {'all': enabled}
+        policies = self.store.server_policies()
+        scoped_policies = {}
         for subscription in self.store.subscriptions():
             key = publication.scope_key(subscription)
             if key not in selections:
                 selected = set(subscription['provider_ids'])
-                selections[key] = [p for p in enabled if p['id'] in selected]
+                selections[key] = [p for p in enabled if subscription['all_providers'] or p['id'] in selected]
+            if subscription['id'] in policies:
+                scoped_policies[key] = policies[subscription['id']]
         scopes = {}
+        source_configurations = None
+        source_signature = tuple((p['id'], p['name'], statuses[p['id']].get('_content_key')) for p in enabled)
         for key, providers in selections.items():
             signature = (checked_combine, tuple((p['id'], p['name'], statuses[p['id']].get('_content_key'))
                                                for p in providers))
+            if key in scoped_policies:
+                signature += (source_signature,)
             with self.cache_guard:
                 cached = self.scope_cache.get((namespace, key))
             if cached and cached[0] == signature:
                 scopes[key] = cached[1]
                 continue
             # Validation removes outputs. Each selection owns its mutable entries.
-            nodes = copy.deepcopy([node for p in providers for node in by_provider[p['id']]])
+            nodes = server_policy.apply(by_provider, [p['id'] for p in providers], scoped_policies.get(key, {}))
+            for node in nodes:
+                if node.source_entry is None:
+                    continue
+                if source_configurations is None:
+                    source_configurations = pipeline.configurations(scopes['all'][0])
+                source = server_policy.customize(node.source_entry, {})
+                for core in list(source.outputs):
+                    try:
+                        accepted_source = (source.identity, core, connectivity.fingerprint(source, core)) in source_configurations
+                    except common.SubscriptionError:
+                        accepted_source = False
+                    if not accepted_source:
+                        source.outputs.pop(core)
+                node.source_entry = source
             accepted = checked_combine(nodes, self.store.root)
             self.log_validation(accepted)
             scopes[key] = (nodes, accepted['validation'])
@@ -374,7 +408,8 @@ class Manager:
         publications, keys, pending = {}, {}, False
         for key, (nodes, validation) in scopes.items():
             digest = hashlib.sha256(json.dumps([health.get(identity) for identity in
-                sorted({node.identity for node in nodes})], sort_keys=True).encode()).hexdigest()
+                sorted({node.identity for node in nodes} | {node.source_entry.identity for node in nodes
+                                                           if node.source_entry is not None})], sort_keys=True).encode()).hexdigest()
             signature = (id(nodes), max_age, digest)
             saved = self.snapshot if key == 'all' else self.snapshot.get('publications', {}).get(key, {})
             if (self.publication_keys.get(key) == signature
@@ -586,9 +621,13 @@ class Manager:
             by_source = {p['name']: [] for p in config['providers'] if p['enabled']}
             for entry in candidate_entries:
                 by_source[entry.source].append(entry)
-            required = {p['id']: pipeline.configurations(by_source[p['name']])
+            # Provider promotion depends on its original configurations. Failed
+            # or pending custom endpoints must never hold up a provider draw.
+            all_required = {p['id']: pipeline.configurations(by_source[p['name']])
                         for p in config['providers'] if p['enabled']}
-            allowed = set().union(*(keys for identifier, keys in required.items()
+            required = {identifier: pipeline.configurations(e for e in by_source[p['name']] if e.source_entry is None)
+                        for p in config['providers'] if p['enabled'] for identifier in [p['id']]}
+            allowed = set().union(*(keys for identifier, keys in all_required.items()
                                   if captured is None or captured.get(identifier) == versions.get(identifier)))
             if incoming is not None:
                 results = pipeline.merge_results(results, incoming, allowed)
@@ -615,7 +654,7 @@ class Manager:
                 else:
                     coverage[identifier] = {'generation': generation, 'done': sorted(done)}
             scopes = self.prepare_scopes(config, active_nodes, active_statuses)
-            needed = set().union(*required.values(), pipeline.configurations(
+            needed = set().union(*all_required.values(), pipeline.configurations(
                 entry for nodes, _ in scopes.values() for entry in nodes))
             if incoming is not None:
                 results = pipeline.retained_results(results, needed)
@@ -628,7 +667,7 @@ class Manager:
             batch = self.next_check_batch if next_batch is None else next_batch
             due = self.next_check
             if incoming is not None:
-                candidate_health = pipeline.retained_results(results, set().union(*required.values()))
+                candidate_health = pipeline.retained_results(results, set().union(*all_required.values()))
                 proposed = connectivity.next_check_at(candidate_health, config['check_seconds'], batch_due=batch)
                 due = proposed if next_batch is not None or global_check else min(due, proposed)
             elif pending or coverage:
@@ -640,6 +679,7 @@ class Manager:
                          'cached': sum(s['status'] == 'cached' for s in statuses.values()), 'checked': checked}
                 history = ([event] + history)[:20]
             snapshot = {**combined, 'providers': statuses, 'publications': publications, 'connectivity': results,
+                        'adapter_policy': self.adapter_policy,
                         'sources_key': sources_key, 'active_selections': active, 'selection_checks': coverage,
                         'last_download': max((stamp for stamp in [previous.get('last_download'),
                             *(status.get('fetched_at') for status in statuses.values())] if stamp), default=None),
@@ -699,8 +739,31 @@ class Manager:
             regular = job.get('regular', False)
             reuse = ((connectivity.BATCH_REUSE_SECONDS if regular else config['check_seconds'])
                      if job.get('reuse_recent') else 0)
-            results = self.checker(entries, self.store.root, stop=self.stop, previous=previous,
-                                   progress=progress, targets=targets, reuse_seconds=reuse)
+            originals = [entry for entry in entries if entry.source_entry is None]
+            variants = [entry for entry in entries if entry.source_entry is not None]
+            deadline = time.monotonic() + env_int('PARSER_CHECK_BATCH_SECONDS', connectivity.BATCH_TIMEOUT, 1, 300)
+            results = self.checker(originals, self.store.root, stop=self.stop, previous=previous,
+                                   progress=progress, targets=targets, reuse_seconds=reuse, deadline=deadline)
+            if variants:
+                # Check replacements only after their source passes, per core.
+                merged = pipeline.merge_results(previous, results, pipeline.configurations(originals))
+                eligible = []
+                for entry in variants:
+                    candidate = copy.copy(entry)
+                    candidate.outputs = dict(entry.outputs)
+                    for core in list(candidate.outputs):
+                        if connectivity.current_result(entry.source_entry, core, merged,
+                                                       config['check_seconds'] * 2)['status'] != 'passed':
+                            candidate.outputs.pop(core)
+                    if candidate.outputs:
+                        eligible.append(candidate)
+                if eligible:
+                    completed = self.check_progress['done']
+                    def variant_progress(done, total):
+                        progress(completed + done, completed + total)
+                    checked = self.checker(eligible, self.store.root, stop=self.stop, previous=merged,
+                        progress=variant_progress, targets=targets, reuse_seconds=reuse, deadline=deadline)
+                    results = pipeline.merge_results(results, checked, pipeline.configurations(variants))
             with self.guard:
                 self.check_phase = 'updating'
                 self._sync_busy()
@@ -898,6 +961,127 @@ class Manager:
         key = publication.scope_key(subscription)
         return self.snapshot if key == 'all' else self.snapshot.get('publications', {}).get(key, {})
 
+    def _subscription_sources(self, subscription):
+        """Resolve bindings against the pinned sample, never an unchecked fetch."""
+        config = self.store.config()
+        providers = {p['id']: p for p in config['providers']}
+        matches = {}
+        if self.snapshot.get('sources_key') == self.sources_key(config):
+            for provider in providers.values():
+                if not provider['enabled'] or (not subscription['all_providers']
+                        and provider['id'] not in subscription['provider_ids']):
+                    continue
+                saved = self.read_selection(provider, self.snapshot.get('active_selections', {}).get(provider['id']))
+                if saved:
+                    for entry in saved['entries']:
+                        key = (provider['id'], server_policy.source_key(entry))
+                        if key not in matches or entry.group_size < matches[key].group_size:
+                            matches[key] = entry
+        return config, providers, matches
+
+    def subscription_servers(self, identifier, query='', offset=0, limit=50):
+        self.ensure_publications()
+        with self.publish_guard:
+            subscription = self.store.subscription(identifier)
+            policy = self.store.server_policy(identifier)
+            config, providers, matches = self._subscription_sources(subscription)
+            results, now = self.snapshot.get('connectivity', {}), time.time()
+            max_age = config['check_seconds'] * 2
+            original_inventory = {row['id']: row for row in self.snapshot.get('inventory', [])}
+            effective_inventory = {row['id']: row for row in self.subscription_snapshot(subscription).get('inventory', [])}
+            def health(entry):
+                return {core: {key: value for key, value in connectivity.current_result(
+                    entry, core, results, max_age, now).items() if key not in {'fingerprint', 'checked_ts', 'deferred'}}
+                    for core in connectivity.CORES}
+            def working(entry):
+                accepted = original_inventory.get(entry.identity[:16], {}).get('clients', [])
+                return any(core in accepted and value['status'] == 'passed' for core, value in health(entry).items())
+            bound = {(r['provider_id'], r['source_identity']) for r in policy['records']}
+            available = []
+            for (provider_id, identity), entry in matches.items():
+                if (provider_id, identity) in bound or not working(entry):
+                    continue
+                available.append({'provider_id': provider_id, 'provider_name': providers[provider_id]['name'],
+                                  'source_identity': identity, 'source': server_policy.describe(entry)})
+            records = []
+            for record in policy['records']:
+                entry = matches.get((record['provider_id'], record['source_identity']))
+                source = server_policy.describe(entry) if entry else record['source']
+                effective = server_policy.customize(entry, record) if entry else None
+                published = effective_inventory.get(effective.identity[:16]) if effective else None
+                checks = published.get('connectivity', {}) if published else health(effective) if effective else {}
+                provider = providers.get(record['provider_id'])
+                source_working = working(entry) if entry else False
+                status = ('unavailable' if entry is None else 'source_failed' if not source_working else
+                          'working' if any(v['status'] == 'passed' for v in checks.values()) else 'pending_or_failed')
+                suggestions = []
+                if entry is None:
+                    suggestions = [candidate for candidate in available
+                        if candidate['provider_id'] == record['provider_id']
+                        and candidate['source']['protocol'] == source['protocol']
+                        and (candidate['source']['address'] == source['address']
+                             or candidate['source']['name'] == source['name'])][:3]
+                records.append({**record, 'source': source, 'source_present': entry is not None,
+                    'provider_name': provider['name'] if provider else record['provider_name'],
+                    'status': status, 'checks': checks, 'suggestions': suggestions})
+            query = query.strip().casefold()
+            available = [row for row in available if query in ' '.join(str(value or '') for value in
+                (row['provider_name'], *row['source'].values())).casefold()]
+            available.sort(key=lambda row: (row['source']['name'].casefold(), row['provider_id'], row['source_identity']))
+            return {'subscription_id': identifier, 'revision': policy['revision'], 'all_servers': policy['all_servers'],
+                    'records': records, 'available': available[offset:offset + limit], 'available_total': len(available),
+                    'offset': offset, 'limit': limit, 'max_records': server_policy.MAX_RECORDS}
+
+    def change_subscription_servers(self, identifier, values):
+        with self.publish_guard, self.guard:
+            if self.busy:
+                raise Busy('wait for the current refresh or connection check before changing server selections')
+            subscription = self.store.subscription(identifier)
+            previous = self.store.server_policy(identifier)
+            if previous['revision'] != values['revision']:
+                raise Busy('server selection changed; reopen the editor before saving')
+            config, providers, matches = self._subscription_sources(subscription)
+            original_inventory = {row['id']: row for row in self.snapshot.get('inventory', [])}
+            old = {r['id']: r for r in previous['records']}
+            records, seen, record_ids = [], set(), set()
+            if len(values['records']) > server_policy.MAX_RECORDS:
+                raise common.SubscriptionError('too many saved servers in this subscription')
+            for value in values['records']:
+                record_id = value.get('id')
+                before = old.get(record_id) if record_id else None
+                if record_id and before is None:
+                    raise common.SubscriptionError('saved server does not belong to this subscription')
+                key = (value['provider_id'], value['source_identity'])
+                if key in seen or record_id and record_id in record_ids:
+                    raise common.SubscriptionError('choose each source server only once')
+                seen.add(key)
+                if record_id:
+                    record_ids.add(record_id)
+                relink = before is not None and key != (before['provider_id'], before['source_identity'])
+                if relink and not value.get('relink'):
+                    raise common.SubscriptionError('explicitly relink this saved server to change its source')
+                entry = matches.get(key)
+                if before is None or relink:
+                    accepted = original_inventory.get(entry.identity[:16], {}).get('clients', []) if entry else []
+                    if entry is None or not any(core in accepted and connectivity.current_result(entry, core,
+                            self.snapshot.get('connectivity', {}), config['check_seconds'] * 2)['status'] == 'passed'
+                            for core in connectivity.CORES):
+                        raise common.SubscriptionError('selected server is no longer working in this provider selection; reload servers')
+                edits = server_policy.overrides(value)
+                if entry and not server_policy.customize(entry, edits).outputs:
+                    raise common.SubscriptionError('this server does not support address or port customization')
+                records.append({'id': record_id or secrets.token_hex(8), 'provider_id': key[0],
+                    'provider_name': providers[key[0]]['name'] if key[0] in providers else before['provider_name'],
+                    'source_identity': key[1], 'source': server_policy.describe(entry) if entry else before['source'],
+                    'selected': value.get('selected', True), **edits})
+            revision = self.store.save_server_policy(identifier, values['revision'], values['all_servers'], records)
+            self.state_revision = secrets.token_hex(8)
+            # A durable intent survives a restart between saving and rebuilding.
+            self._queue_check(reuse_recent=True)
+            self.busy = True
+        self.refresh(download=False, check=False)
+        return {'revision': revision}
+
     def public_subscriptions(self, base_url, *, ensure=True, sources_key=None):
         if ensure:
             self.ensure_publications()
@@ -1055,6 +1239,36 @@ class Manager:
                 pass
             except Exception as error:
                 self.logs.write('scheduler_failed', error=error)
+
+    def server_detail(self, identifier):
+        # Read the pinned library selection, never a newer, unchecked download.
+        # Configuration reads do not contact providers or run client cores.
+        with self.publish_guard:
+            with self.guard:
+                snapshot = self.snapshot
+                config = self.store.config()
+                if snapshot.get('sources_key') != self.sources_key(config):
+                    return None
+                server = next((node for node in snapshot.get('inventory', []) if node['id'] == identifier), None)
+                if server is None:
+                    return None
+            matches = []
+            for provider in config['providers']:
+                if not provider['enabled'] or provider['name'] not in server['sources']:
+                    continue
+                saved = self.read_selection(provider, snapshot.get('active_selections', {}).get(provider['id']))
+                if saved:
+                    matches.extend(entry for entry in saved['entries'] if entry.identity[:16] == identifier)
+            if not matches:
+                return None
+            entry = min(matches, key=lambda node: node.group_size)
+            detail = {key: server[key] for key in ('id', 'name', 'protocol', 'sources')}
+            detail.update({'fields': server_details.describe(entry),
+                           'configurations': server_details.configurations(entry)})
+            with self.guard:
+                if snapshot.get('sources_key') != self.sources_key():
+                    return None
+            return detail
 
     def public_state(self, base_url, revision=None):
         self.ensure_publications()

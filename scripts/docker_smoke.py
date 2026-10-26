@@ -116,6 +116,30 @@ def main():
         scoped = next(item for item in api('/api/subscriptions') if item['id'] == scoped_id)
         assert scoped['counts']['v2board'] == 1 and scoped['links'] != state['links']
         scoped_link = scoped['links']['v2board.txt']
+        policy_path = f'/api/subscriptions/{scoped_id}/servers'
+        policy = api(policy_path)
+        source = policy['available'][0]
+        api(policy_path, 'PUT', {'revision': policy['revision'], 'all_servers': False, 'records': [{
+            'provider_id': source['provider_id'], 'source_identity': source['source_identity'],
+            'selected': True, 'address': 'localhost', 'port': 20901, 'name': 'My Docker server'}]})
+        deadline = time.monotonic() + 70
+        while time.monotonic() < deadline:
+            saved_policy = api(policy_path)
+            state = api('/api/state')
+            if (not state['busy'] and not state['check_queued'] and saved_policy['records'][0]['status'] == 'working'
+                    and all(saved_policy['records'][0]['checks'][core]['status'] == 'passed'
+                            for core in ('mihomo', 'xray', 'hiddify'))):
+                break
+            time.sleep(0.5)
+        else:
+            raise RuntimeError('custom subscription endpoint did not pass the local fixture checks')
+        with urllib.request.urlopen(scoped['links']['hiddify.json'], timeout=10) as response:
+            customized = json.load(response)['outbounds'][0]
+            assert customized['server'] == 'localhost' and customized['server_port'] == 20901
+            assert 'My Docker server' in customized['tag']
+        with urllib.request.urlopen(state['links']['hiddify.json'], timeout=10) as response:
+            assert json.load(response)['outbounds'][0]['server'] == '127.0.0.1'
+        checks.append('subscription endpoint overrides pass real core checks while the original feed stays unchanged')
         setup = api('/api/security/2fa/setup', 'POST', {'token': admin})
         code = compose('exec', '-T', 'app', 'python', '-c',
                        'import pyotp, sys; print(pyotp.TOTP(sys.stdin.read()).now())', data=setup['secret'].encode()).decode().strip()
@@ -140,6 +164,13 @@ def main():
         with urllib.request.urlopen(scoped_link, timeout=10) as response:
             assert response.status == 200 and UUID.encode() in response.read()
         checks.append('named subscription selections, independent tokens and passing feeds survive container replacement')
+        restored_policy = api(policy_path)
+        assert restored_policy['revision'] == saved_policy['revision'] and not restored_policy['all_servers']
+        for field in ('id', 'provider_id', 'source_identity', 'selected', 'address', 'port', 'name'):
+            assert restored_policy['records'][0][field] == saved_policy['records'][0][field], field
+        with urllib.request.urlopen(scoped['links']['hiddify.json'], timeout=10) as response:
+            assert json.load(response)['outbounds'][0] == customized
+        checks.append('saved source bindings, endpoint/name overrides and passing custom feeds survive container replacement')
         try:
             urllib.request.urlopen(old, timeout=10)
             raise AssertionError('old subscription token remained valid')
@@ -159,7 +190,7 @@ def main():
         verification = '''
 import os
 from pathlib import Path
-from subscription_parser.storage import Store
+from subscription_parser.storage import Store, SCHEMA_VERSION
 assert os.geteuid() == 10001
 assert not Path('/app/.env').exists()
 assert not Path('/app/.parser-state').exists()
@@ -171,7 +202,7 @@ assert all(path.stat().st_mode & 0o777 == 0o600 for path in Path('/data/logs').i
 store = Store(Path('/data'))
 with store.connection() as connection:
     assert connection.execute('SELECT count(*) FROM subscriptions').fetchone()[0] == 2
-    assert connection.execute('PRAGMA user_version').fetchone()[0] == 7
+    assert connection.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
 identities = {item['name']: item['id'] for item in store.hwids()}
 assert store.hwid_value(identities['DEVICE_ID']) == 'docker-authorized-id'
 assert store.hwid_value(identities['Second device']) == 'docker-second-authorized-id'

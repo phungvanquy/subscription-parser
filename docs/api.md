@@ -107,6 +107,7 @@ when created or replaced; there is no endpoint to reveal them later.
 | --- | --- | --- |
 | GET | `/healthz` | Public process-health response: `{"status":"ok"}`. `/health` is an alias. |
 | GET | `/api/state` | Dashboard inventory, providers, masked devices, subscriptions, counts, schedules, and job progress. |
+| GET | `/api/servers/{id}` | Authenticated per-server details and configuration text from the current library selection, including credentials. Returns `fields` and `configurations` (format ID, label, content, language, filename, description). Does not fetch providers or check connections. Missing/removed servers return HTTP 404. |
 | GET | `/api/logs?level=all` | Latest 200 matching debug events. `level` is `all`, `warning`, or `error`. |
 | POST | `/api/refresh` | Downloads all enabled providers, or only `provider_id`, and queues their selected servers for independent connection checks. Download completion does not mean checks are complete. A selected refresh preserves other providers' results and global schedules. Paused/unknown IDs return HTTP 400; accepted jobs return HTTP 202. |
 | POST | `/api/check-servers` | Explicitly rechecks all cached configurations without upstream fetches, including recently checked servers. Returns HTTP 202. |
@@ -229,6 +230,8 @@ from `/api/state` before constructing a replacement request.
 | PUT | `/api/subscriptions/{id}` | Replaces its name and selection while retaining its token. |
 | DELETE | `/api/subscriptions/{id}` | Deletes it and invalidates its links. The original `default` cannot be deleted. |
 | POST | `/api/subscriptions/{id}/rotate-link` | Replaces only this subscription's token. |
+| GET | `/api/subscriptions/{id}/servers` | Saved server policy plus paginated working source candidates. |
+| PUT | `/api/subscriptions/{id}/servers` | Replaces the saved server policy at its current revision and queues checks. |
 | POST | `/api/rotate-link` | Compatibility endpoint: rotates only the original `default` subscription. |
 
 Names must be unique and contain 1–80 characters. Choose exactly one selection
@@ -245,6 +248,64 @@ mode, using IDs from `/api/state`:
 A specific selection must contain at least one existing provider and no duplicates.
 All-provider mode requires an empty `provider_ids` list. Creating or editing a
 subscription rebuilds publications from cached responses without fetching providers.
+
+### Subscription server selections and overrides
+
+`GET /api/subscriptions/{id}/servers` accepts `q` (up to 200 characters),
+`offset` (default 0), and `limit` (1–100, default 50). It returns:
+
+- `revision` (0 before the first edit), `all_servers` (default true), and
+  `max_records` (1000).
+- `records`: all saved source bindings, including unavailable or deselected ones.
+  Each has a persistent local `id`, `provider_id`, `provider_name`, full
+  `source_identity`, `source` summary (name, protocol, address, port), `selected`,
+  and nullable `address`, `port`, and `name` overrides.
+- Each saved record also includes `source_present`, `checks`, `suggestions`, and
+  `status`: `working`, `unavailable`, `source_failed`, or `pending_or_failed`.
+  Status describes connection availability, independently of `selected`.
+- `available`, `available_total`, `offset`, and `limit`: currently working source
+  candidates not already bound in this policy. Candidates use provider IDs and
+  full original configuration hashes, not the library's shortened server IDs.
+
+Save the complete record list, using IDs and identities from this endpoint:
+
+```json
+{
+  "revision": 0,
+  "all_servers": false,
+  "records": [{
+    "provider_id": "PROVIDER_ID",
+    "source_identity": "FULL_64_CHARACTER_SOURCE_HASH",
+    "selected": true,
+    "address": "relay.example.com",
+    "port": 8443,
+    "name": "My server"
+  }]
+}
+```
+
+The response is `{"revision": 1}`. For existing records, send their local `id`.
+Omitted records are forgotten. A deselected record retains its edits; selection
+flags are consulted only when `all_servers` is false. `all_servers: false` with
+an empty list publishes nothing. Overrides omitted or set to null/blank inherit
+source values; a port must be an integer from 1 to 65535 or null. Names accept
+up to 200 characters without controls; addresses accept a hostname or IP, not a
+URL. Unknown fields are rejected.
+
+Changing an existing record's source requires `relink: true` and a currently
+working candidate's `provider_id` and `source_identity`. The record's local ID
+stays unchanged. The caller must resend the overrides it wants to retain.
+Suggestions are never applied automatically. Missing records may still be edited
+without relinking. New bindings and relinks must belong to this subscription's
+currently selected, enabled providers and their published samples.
+
+Saving during a running job or with an outdated revision returns 409. Policy
+updates are atomic, preserve subscription tokens, use cached providers, and
+queue checks durably. A configuration change cannot use a previous variant's
+passing result. Provider sampling and original-source health remain prerequisites
+for publication; modified settings additionally require their own passing checks.
+Subscription summaries include `server_policy.revision` and
+`server_policy.all_servers`; full records are returned only by this endpoint.
 
 ## Subscription downloads
 
@@ -271,8 +332,8 @@ programmatic signal rather than matching the wording.
 | 401 | Missing/expired session or failed login verification. |
 | 403 | Cross-origin change rejected or security re-verification failed. |
 | 404 | Unknown route or subscription token/filename. |
-| 409 | Running job prevents a change, or two-factor setup state conflicts. |
-| 413 | Request body exceeds 16 KiB. |
+| 409 | Running job prevents a change, a server-policy revision is stale, or two-factor setup state conflicts. |
+| 413 | Request body exceeds 16 KiB, or 1 MiB for a subscription server-policy PUT. |
 | 422 | Request fields fail schema validation. |
 | 429 | Authentication rate limit reached; wait for `Retry-After`. |
 | 500 | Unexpected internal failure; inspect the private admin logs. |

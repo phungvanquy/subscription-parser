@@ -86,6 +86,73 @@ Provider sampling cases cover random selection independent of order and duplicat
 rows, probe/feed limits, saved draws across rechecks and restarts, new draws on
 successful fetches, preview reuse, per-subscription scope isolation, native
 dependencies, and transactional upgrades from schema 6.
+Subscription-policy regressions cover schema-8 rollback, preserved tokens, exact
+source matching, rename/restart recovery, missing sampled servers, explicit
+relinking, per-client source and variant health, cross-subscription isolation,
+shared variant checks, source expiry, stale revisions, and late worker results.
+Real-core fixtures also verify address and port overrides with VLESS, VMess,
+Shadowsocks, and Trojan.
+Mihomo compatibility tests tunnel verified HTTPS through local XHTTP fixtures in
+packet-up, stream-up, and stream-one modes with all three cores. REALITY tests
+verify the opt-in Chrome/MLKEM configuration and reject a wrong public key.
+Upgrade regressions ensure adapter changes recheck cached sources, preserve
+source identities and saved samples, and reuse only unchanged core results.
+Hysteria2 fixtures exercise Xray's Salamander UDP mask through all three client
+cores, including wrong/missing obfuscation, authentication failures, TLS
+verification, and cleanup. Upgrade regressions preserve existing source bindings,
+provider samples, and Xray checks when the new Hysteria2 variants become available.
+Advanced XHTTP tests exercise GET/header upload, tokenish query padding,
+session/sequence placement, and XMUX with real Mihomo/Xray cores over plaintext
+HTTP and TLS. Negative probes reject missing required transport options, wrong
+credentials, and invalid TLS names. Mapping tests preserve Xray's `extra`
+precedence, range defaults, native outputs, saved bindings, and sampling across
+adapter upgrades; unchanged Xray checks remain reusable.
+
+### Subscription server-policy design
+
+The implementation preserves these boundaries:
+
+1. **Persistent state.** `subscription_server_policies` stores one revisioned
+   policy per subscription: all-working or selected-only mode, and at most 1000
+   saved records. Each record has a local ID, provider ID, full original source
+   identity, a source summary, a selection flag, and optional address/port/name
+   overrides. Policy replacements are transactional; stale revisions fail.
+   Deleting the subscription cascades to its policy. Removing a provider does
+   not erase saved records. The v8 migration defaults to existing behavior.
+2. **Source identity.** Bindings use provider ID plus a hash of the original
+   native settings and dependency identity. This is stricter than the portable
+   deduplication ID and captures native extras such as Xray mux settings. Own
+   display names, URI fragments, and encoded VMess `ps` labels are excluded. Modified upstream
+   configurations are not heuristically substituted: the editor offers explicit
+   relinking, retaining the local record ID and chosen overrides. Credentials or
+   coincident names are not treated as upstream node IDs.
+3. **Configuration building.** `server_policy.py` copies each native output and
+   edits its endpoint, preserving native extras and dependency bundles. It keeps
+   immutable source context shared to avoid quadratic copying. Unmodified and
+   name-only entries retain existing check identities; endpoint variants receive
+   an identity derived from the original identity and effective configurations.
+4. **Checks and publication.** Provider sampling and original validation run
+   first. Customized scopes retain only selected source entries. Original checks
+   run before variant checks; a variant is probed only for cores whose original
+   source passed. Publication requires both checks and expires at the earlier
+   deadline. Source validation rejection also blocks that client. Provider-draw
+   promotion depends on original configurations, so failed variants cannot stall
+   refreshes. Existing generation guards reject late worker results.
+5. **Isolation and recovery.** Custom scope keys include subscription ID, provider
+   selection, and policy revision. A failed rebuild cannot serve an old policy's
+   outputs. Policy saves queue a durable check intent and do not fetch providers.
+   Expiry rebuilds restore variants from pinned source selections after restart.
+   Identical variants of the same source reuse checks across subscriptions. Both
+   checking stages share one batch deadline. Startup recovers a policy committed
+   just before its check intent or publication could be saved.
+6. **Editor and API.** The authenticated server-policy endpoint returns all saved
+   entries and paginated working candidates. The browser renders 25 compact saved
+   rows and at most one expanded editor, with separate saved/add tabs, provider
+   and status filters, page jumps, and bulk actions over explicit filtered matches.
+   It keeps its draft across polling, paging, and filtering, supports field resets
+   and explicit relinking, and clears private dialog state on close/logout.
+   Only the policy PUT receives a 1 MiB
+   request allowance; other mutation limits remain 16 KiB.
 
 Measure application overhead with an isolated synthetic library:
 
@@ -110,9 +177,11 @@ PARSER_IMAGE=subscription-parser:smoke python3 scripts/docker_smoke.py
 
 The script creates an isolated Compose project with synthetic credentials and a
 temporary volume. It checks migration, HWIDs, all six output formats, proxy
-headers, scoped subscriptions, token rotation, authentication, and container
-replacement. Real Mihomo/Xray/Hiddify checks run through a local VLESS fixture and HTTPS
-origin with a temporary certificate. The script removes its own test resources.
+headers, scoped subscriptions, endpoint/name overrides, token rotation,
+authentication, and container replacement. Saved source bindings and custom
+feeds must survive replacement without changing the original feed. Real
+Mihomo/Xray/Hiddify checks run through a local VLESS fixture and HTTPS origin with
+a temporary certificate. The script removes its own test resources.
 
 ### Browser checks
 
@@ -139,6 +208,9 @@ authenticator setup, recovery, and login throttling. Provider checks include
 working/client counts, shared servers, pending/expired/failed checks, action menus,
 keyboard focus during polling, and mobile filtering. They do not change the live
 deployment.
+Server-policy checks exercise 1000 saved entries, bounded row rendering, bulk
+selection across pages, page addition without duplicates, draft persistence,
+invalid hidden ports, failed-save recovery, and layouts from 320 to 1440 pixels.
 The suite also holds a single-provider check open to verify that its progress
 names the selected provider while other rows remain idle.
 
@@ -190,6 +262,7 @@ exercise responsive layouts in desktop engines, not physical phones.
 | `subscription_parser/v2board_native.py` | Bounded, versioned native V2Board JSON export. |
 | `subscription_parser/connectivity.py` | Isolated Mihomo/Xray HTTPS checks and freshness policy. |
 | `subscription_parser/publication.py` | Scoped output feeds and diagnostic archives. |
+| `subscription_parser/server_policy.py` | Persistent source bindings and format-preserving endpoint overrides. |
 | `subscription_parser/debug_log.py` | Private event logging and retention. |
 | `subscription_parser/static/` | Dashboard HTML, CSS, and JavaScript. |
 | `scripts/` | Core installer, state importer, fixtures, and smoke checks. |

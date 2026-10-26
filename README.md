@@ -13,6 +13,9 @@ or more providers and has its own stable import links.
 
 - **Multiple providers and subscriptions.** Manage up to 200 providers and any
   number of named output subscriptions, with independent provider selections.
+- **Persistent server customization.** Select working servers per subscription
+  and override their address, port, or name. Saved edits survive missing servers;
+  changed endpoints need their own passing checks.
 - **Protocol-aware conversion.** Import JSON, YAML, and plain or base64 share
   links. Preserve supported protocols, credentials, and transport settings.
 - **Automatic connection checks.** Test through Mihomo, Xray and Hiddify, then publish
@@ -91,6 +94,9 @@ flowchart LR
 Provider refreshes download source subscriptions using saved device assignments.
 Connection checks reuse cached configurations. Each output subscription selects
 its own providers while sharing downloads and check results with other subscriptions.
+Subscriptions can also save individual server selections and overrides. Provider
+random sampling stays in effect; customized endpoints are published only while
+both the source and the customized configuration pass their client checks.
 
 ## Documentation
 

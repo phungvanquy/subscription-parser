@@ -14,7 +14,8 @@ import re
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import yaml
-from . import common, hysteria
+from . import common, hysteria, xhttp
+from .config import env_bool
 from .xray_transports import hiddify_outbound
 
 Error = common.SubscriptionError
@@ -23,6 +24,13 @@ Error = common.SubscriptionError
 SKIP = {"direct", "block", "dns", "selector", "urltest", "freedom", "blackhole", "loopback", "reject", "pass"}
 COMMON = {"vless", "vmess", "shadowsocks", "trojan", "hysteria", "hysteria2", "tuic", "socks", "http"}
 TARGETS = ("hiddify", "mihomo", "xray")
+
+
+def adapter_policy():
+    # Recheck cached sources after adapter changes without redrawing samples or
+    # changing server identities. Exact, unchanged core checks remain reusable.
+    return {"version": 3, "mihomo_reality_compatibility":
+            env_bool('PARSER_MIHOMO_REALITY_COMPATIBILITY')}
 
 
 def only(data, keys, description):
@@ -127,11 +135,35 @@ def xray_to_native(raw, notes):
         only(hy, {"version", "auth"}, "Xray Hysteria transport")
         if stream.get("finalmask"):
             mask = stream["finalmask"]
-            only(mask, {"quicParams"}, "FinalMask")
-            only(mask.get("quicParams", {}), {"debug", "congestion"}, "QUIC tuning")
-            notes.append("Xray QUIC congestion tuning uses the destination client's defaults")
+            if not isinstance(mask, dict):
+                raise Error("Hysteria2 FinalMask must be an object")
+            only(mask, {"quicParams", "udp"}, "FinalMask")
+            quic = mask.get("quicParams", {})
+            if not isinstance(quic, dict):
+                raise Error("Hysteria2 QUIC tuning must be an object")
+            only(quic, {"debug", "congestion"}, "QUIC tuning")
+            if quic:
+                notes.append("Xray QUIC congestion tuning uses the destination client's defaults")
+            masks = mask.get("udp", [])
+            if masks is not None and masks != []:
+                if (not isinstance(masks, list) or len(masks) != 1
+                        or not isinstance(masks[0], dict)
+                        or set(masks[0]) != {"type", "settings"}
+                        or masks[0]["type"] != "salamander"):
+                    raise Error("Hysteria2 conversion requires a single Salamander UDP mask")
+                obfs = masks[0]["settings"]
+                if not isinstance(obfs, dict) or set(obfs) != {"password"}:
+                    raise Error("advanced Salamander/Gecko settings require the original client configuration")
+                if not isinstance(obfs["password"], str) or not obfs["password"]:
+                    raise Error("Salamander requires a nonempty string password")
+                if (stream.get("network") != "hysteria" or stream.get("security") != "tls"
+                        or hy.get("version", 2) != 2):
+                    raise Error("Salamander conversion requires the Hysteria2 transport with TLS")
+                result["obfs"] = {"type": "salamander", "password": obfs["password"]}
         tls = stream.get("tlsSettings", {})
         only(tls, {"serverName", "allowInsecure", "alpn", "fingerprint", "enableSessionResumption"}, "Hysteria TLS")
+        if 'allowInsecure' in tls and not isinstance(tls['allowInsecure'], bool):
+            raise Error("Hysteria TLS verification setting must be a boolean")
         result.update(type="hysteria2", server=settings["address"], server_port=settings["port"], password=hy.get("auth", ""),
                       tls={"enabled": True, "server_name": tls.get("serverName", settings["address"])})
         if tls.get("allowInsecure"):
@@ -150,7 +182,7 @@ def mihomo_to_native(raw, notes):
         raise Error("protocol retained in Mihomo; no cross-client adapter")
     fields = {"name", "type", "server", "port", "udp", "uuid", "flow", "cipher", "alterId", "password", "username",
               "tls", "servername", "sni", "skip-cert-verify", "client-fingerprint", "alpn", "reality-opts",
-              "network", "ws-opts", "grpc-opts", "http-opts", "h2-opts", "packet-encoding", "xudp", "global-padding", "authenticated-length",
+              "network", "ws-opts", "grpc-opts", "http-opts", "h2-opts", "xhttp-opts", "packet-encoding", "xudp", "global-padding", "authenticated-length",
               "plugin", "plugin-opts", "auth", "auth-str", "up", "down", "obfs", "obfs-password", "protocol",
               "recv-window-conn", "recv-window", "disable-mtu-discovery", "ports", "hop-interval",
               "congestion-controller", "udp-relay-mode", "reduce-rtt", "heartbeat-interval"}
@@ -197,6 +229,8 @@ def mihomo_to_native(raw, notes):
         opts = data.get("grpc-opts", {})
         only(opts, {"grpc-service-name"}, "gRPC")
         result["transport"] = {"type": "grpc", "service_name": opts.get("grpc-service-name", "")}
+    elif network == "xhttp":
+        result["transport"] = {"type": "xhttp", **xhttp_options(data.get("xhttp-opts", {}), kind)}
     elif network in {"http", "h2"}:
         opts = data.get(network + "-opts", {})
         only(opts, {"host", "path", "method", "headers"}, "HTTP transport")
@@ -237,6 +271,31 @@ def mihomo_to_native(raw, notes):
     return valid_native(result)
 
 
+def xray_xhttp_to_mihomo(raw, notes):
+    """Add a Mihomo-only mapping without changing portable/native identities."""
+    node = copy.deepcopy(raw)
+    stream = node.get('streamSettings', {})
+    if (node.get('protocol') != 'vless' or not isinstance(stream, dict)
+            or stream.get('network') not in {'xhttp', 'splithttp'}):
+        raise Error('advanced XHTTP conversion requires native Xray VLESS')
+    keys = [key for key in ('xhttpSettings', 'splithttpSettings') if key in stream]
+    if len(keys) != 1:
+        raise Error('ambiguous XHTTP transport settings require the original client configuration')
+    options, messages = xhttp.mihomo_options(stream[keys[0]])
+    tls = stream.get('tlsSettings', {})
+    if not isinstance(tls, dict) or ('allowInsecure' in tls and type(tls['allowInsecure']) is not bool):
+        raise Error('XHTTP TLS verification setting must be a boolean')
+    stream[keys[0]] = {key: value for key, value in options.items() if key in {'path', 'host', 'mode'}}
+    converted_notes = []
+    native = xray_to_native(node, converted_notes)
+    result = native_to_mihomo(native, reality_compatibility=env_bool('PARSER_MIHOMO_REALITY_COMPATIBILITY'))
+    result['xhttp-opts'] = options
+    notes.extend(converted_notes + messages)
+    if result.get('reality-opts', {}).get('support-x25519mlkem768'):
+        notes.append('Generated Mihomo REALITY configuration uses Chrome and X25519-MLKEM768 compatibility settings')
+    return result
+
+
 def mbps(value):
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(?:[mM](?:bps|b|bit)?)?\s*", str(value))
     if not match:
@@ -247,7 +306,28 @@ def mbps(value):
     return int(number)
 
 
-def native_to_mihomo(raw):
+def xhttp_options(options, kind):
+    """The common XHTTP subset; never discard advanced transport settings."""
+    if kind != "vless":
+        raise Error("XHTTP conversion requires VLESS")
+    if not isinstance(options, dict):
+        raise Error("XHTTP settings must be an object")
+    if set(options) - {"path", "host", "mode", "headers"}:
+        raise Error("advanced XHTTP settings require the original client configuration")
+    result = {"path": "/", "mode": "auto", **copy.deepcopy(options)}
+    if (not isinstance(result["mode"], str)
+            or result["mode"] not in {"auto", "stream-one", "stream-up", "packet-up"}):
+        raise Error("unsupported XHTTP mode")
+    if not isinstance(result["path"], str) or not isinstance(result.get("host", ""), str):
+        raise Error("XHTTP path and host must be strings")
+    headers = result.get("headers", {})
+    if (not isinstance(headers, dict)
+            or any(not isinstance(k, str) or not isinstance(v, str) for k, v in headers.items())):
+        raise Error("XHTTP headers must contain string names and values")
+    return result
+
+
+def native_to_mihomo(raw, *, reality_compatibility=False):
     data = copy.deepcopy(raw)
     kind = data["type"]
     if kind not in COMMON:
@@ -299,6 +379,11 @@ def native_to_mihomo(raw):
         only(reality, {"enabled", "public_key", "short_id"}, "REALITY")
         if reality.get("enabled"):
             result["reality-opts"] = {"public-key": reality["public_key"], "short-id": reality.get("short_id", "")}
+            if reality_compatibility and kind == "vless":
+                # Opt-in client tuning for generated Mihomo configurations only.
+                # Keep the source, credentials, SNI and certificate policy intact.
+                result["client-fingerprint"] = "chrome"
+                result["reality-opts"]["support-x25519mlkem768"] = True
     transport = data.get("transport", {})
     if transport:
         network = transport["type"]
@@ -316,6 +401,9 @@ def native_to_mihomo(raw):
         elif network == "grpc":
             only(transport, {"type", "service_name"}, "gRPC")
             result.update(network="grpc", **{"grpc-opts": {"grpc-service-name": transport.get("service_name", "")}})
+        elif network == "xhttp":
+            opts = xhttp_options({k: v for k, v in transport.items() if k != "type"}, kind)
+            result.update(network="xhttp", **{"xhttp-opts": opts})
         elif network == "http":
             only(transport, {"type", "host", "path", "method", "headers"}, "HTTP transport")
             result.update(network="h2", **{"h2-opts": {k: v for k, v in transport.items() if k != "type"}})
@@ -415,6 +503,8 @@ def native_to_xray(data):
             stream[network + "Settings"] = {k: v for k, v in t.items() if k in {"path", "headers", "host"}}
         elif network == "grpc":
             stream["grpcSettings"] = {"serviceName": t.get("service_name", "")}
+        elif network == "xhttp":
+            stream["xhttpSettings"] = xhttp_options({k: v for k, v in t.items() if k != "type"}, kind)
         else:
             raise Error("transport has no verified Xray mapping")
     if kind == "hysteria2":
@@ -541,6 +631,8 @@ class Entry:
     issues: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
     identity: str = ""
+    source_identity: str = ""
+    source_entry: Entry | None = field(default=None, repr=False, compare=False)
 
 
 def adapt(kind, raw, source, label, context=None, group_size=1):
@@ -591,14 +683,32 @@ def adapt(kind, raw, source, label, context=None, group_size=1):
         for client in TARGETS:
             if client not in entry.outputs:
                 entry.issues[client] = reason
+    if (native is None and kind == 'xray' and raw.get('protocol') == 'vless'
+            and isinstance(raw.get('streamSettings'), dict)
+            and raw['streamSettings'].get('network') in ('xhttp', 'splithttp')):
+        try:
+            entry.outputs['mihomo'] = xray_xhttp_to_mihomo(raw, entry.notes)
+            entry.issues.pop('mihomo', None)
+        except (Error, ValueError, KeyError, TypeError, IndexError) as exc:
+            entry.issues['mihomo'] = str(exc) if isinstance(exc, Error) else 'malformed or incomplete proxy settings'
     if native:
         for client, converter in [("mihomo", native_to_mihomo), ("xray", native_to_xray)]:
             if client not in entry.outputs:
                 try:
-                    entry.outputs[client] = converter(native)
+                    if client == "mihomo":
+                        entry.outputs[client] = converter(native, reality_compatibility=
+                            env_bool('PARSER_MIHOMO_REALITY_COMPATIBILITY'))
+                        if entry.outputs[client].get("reality-opts", {}).get("support-x25519mlkem768"):
+                            entry.notes.append("Generated Mihomo REALITY configuration uses Chrome and X25519-MLKEM768 compatibility settings")
+                    else:
+                        entry.outputs[client] = converter(native)
                 except (Error, ValueError, KeyError, TypeError) as exc:
                     entry.issues[client] = str(exc) if isinstance(exc, Error) else "malformed or incomplete proxy settings"
-    identity = copy.deepcopy(native if native else raw)
+    # These native formats previously had no cross-client adapter. Their saved
+    # selections and checks bind to the raw identity; keep it as outputs expand.
+    raw_identity = ((kind == "mihomo" and raw.get("network") == "xhttp")
+                    or (kind == "xray" and native and native.get("type") == "hysteria2" and native.get("obfs")))
+    identity = copy.deepcopy(raw if raw_identity else native if native else raw)
     if isinstance(identity, dict):
         identity.pop("tag", None)
         identity.pop("name", None)

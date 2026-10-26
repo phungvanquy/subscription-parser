@@ -48,7 +48,8 @@ fetch randomly selects 20 without replacement from the full list. It does not
 take the first 20, and duplicate rows do not get extra chances. Only selected
 servers enter connection checks, Server library, and output subscriptions. Each
 compatible client core still has its own check, so 20 servers may require 60
-core checks. Only servers that pass are published; failures do not trigger
+core checks. Subscription endpoint overrides add checks for each distinct custom
+variant; identical variants of the same source share results. Only servers that pass are published; failures do not trigger
 replacement draws to fill the limit. If fewer than 20 servers are available,
 all are selected.
 
@@ -121,7 +122,9 @@ There is no fixed limit on the number of output subscriptions. Each has six
 independent client URLs. Creating or editing a selection uses cached responses
 and shared check results; it does not fetch upstream subscriptions or register
 devices. Distinct selections require local conversion, validation, and export
-storage. Identical selections share the generated publication.
+storage. Subscriptions without server customizations can share identical
+publications. Customized subscriptions have independent publications and reuse
+checks when their effective connection configurations match.
 
 The original subscription has the internal ID `default` and initially uses the
 name **All providers**. It can be renamed, scoped to selected providers, and have
@@ -145,12 +148,69 @@ list controls in place; pages adjust automatically when subscriptions disappear.
 | Copy link | Copies the selected client's URL. |
 | Show URLs | Reveals the addresses for manual selection or inspection. |
 | Edit | Changes the name or provider selection while retaining the URLs. |
+| Choose servers | Selects individual servers and saves address, port, or name overrides for this subscription. |
 | More → Rotate links | Replaces this subscription's token; its previous URLs stop working. |
 | More → Delete | Removes this subscription and invalidates its URLs. |
 
 Deleting a provider removes its assignments. A selection that becomes empty
 stays empty; it does not fall back to all providers. Rotating or deleting a link
 cannot remove configurations a client has already downloaded.
+
+### Select and customize servers
+
+Open a subscription and choose **Choose servers** under **Servers & overrides**.
+These settings apply to all six import links belonging to that subscription.
+
+- **All working servers** keeps the provider selection as the source of servers
+  and applies any saved overrides. Newly sampled working servers join automatically.
+- **Only selected servers** publishes only saved entries whose **Include in this
+  subscription** checkbox is enabled. An empty selection publishes no servers;
+  it never falls back to all servers.
+
+Use the **Add servers** tab to select a working server or customize it. **Add page**
+adds the currently displayed candidates together, within the saved-server limit.
+The **Saved servers** tab shows compact rows, with 25 entries per page and a page
+selector. Search names, addresses, or ports, and filter by provider, selection,
+overrides, or connection status. **Include matches** and **Exclude matches** apply
+to every filtered saved entry across all pages; they retain existing overrides.
+
+Choose **Edit** on a saved row to open its address, port, and name fields. Only
+one editor opens at a time, and drafts survive paging, filtering, and tab changes.
+Provider values appear beside the overrides. Blank fields inherit provider values.
+**Reset** clears one override;
+**Forget saved server** removes its saved selection and edits when you save the
+form. Unchecking a selection preserves its overrides. Up to 1000 source servers
+can be saved in each subscription. Bulk actions stay in the draft until you save;
+Cancel discards them. Save and validation errors remain visible at the bottom.
+
+Provider sampling remains authoritative. Saved selections do not pin servers into
+a provider's random sample or fill vacancies with replacements. A selected server
+that disappears, fails, leaves the sample, or belongs to a paused/removed provider
+stays saved but contributes no working configuration. It can resume publication
+when the same source returns and the required checks pass. Selecting five servers
+does not guarantee five will appear in the feed on every refresh.
+
+Matching uses a fingerprint of the original native configuration within its
+provider, including settings specific to one client. Your own
+name/address/port overrides do not alter that binding. Ordinary source renames
+are recognized; changed credentials, endpoints, transports, or dependencies may
+produce a different identity. Such changes require **Relink source…** or an
+explicitly chosen suggested match. Names and addresses are hints, not automatic
+proof of identity. Relinking retains the saved selection and overrides. No stable
+upstream node-ID contract is assumed for the currently supported imports.
+
+Address and port overrides preserve the source's credentials, TLS/SNI, transport,
+and native client settings. A single port replaces any port-hopping range. An
+unsupported endpoint shape is excluded for the affected client. Both the original
+source and the effective customized configuration need current passing checks for
+each client format. Name-only edits reuse connection checks. Saving queues needed
+checks without fetching providers; pending or failed custom endpoints are not
+published. Editing one subscription leaves other subscriptions and provider
+configurations unchanged. Import URLs remain stable.
+
+The editor keeps a local draft while the dashboard polls. **Cancel** discards that
+draft. Concurrent server-policy edits are rejected; reopen the editor to review
+the latest saved revision before saving again.
 
 ## Import into clients
 
@@ -224,7 +284,7 @@ supported transports. Conversion retains the original protocol.
 | Native protocols | Additional protocols can remain in their original client format when its installed core accepts them. Publication still requires an applicable passing connection check. |
 | Hysteria v1 and TUIC | Supported by the Hiddify/Mihomo adapters; excluded from this Xray adapter. |
 | Xray Hysteria2 | Xray `protocol: hysteria` with `version: 2` is classified as Hysteria2. |
-| XHTTP | Supported in native Hiddify output; excluded from the Mihomo conversion adapter. |
+| XHTTP | VLESS path, host, mode, and headers convert between Hiddify, Mihomo, and Xray. Advanced options without a verified mapping remain in their original client format. |
 | Xray fragmentation chains | Retained with namespaced dependencies in Xray output; excluded from conversions without an equivalent representation. |
 | Source routing and DNS | Replaced by the destination export's routing model; provider profiles are not reproduced as complete operating-system configurations. |
 
@@ -233,6 +293,32 @@ rejected node is excluded for that client and reported in compatibility notes.
 Passing validation means a configuration can be loaded. Passing a connection
 check is the additional requirement for publication.
 
+For providers requiring different REALITY ClientHello settings, the deployment
+option `PARSER_MIHOMO_REALITY_COMPATIBILITY=true` selects Chrome fingerprint and
+`support-x25519mlkem768: true` for generated Mihomo VLESS configurations. It is
+disabled by default and recorded in each affected server's notes. Native Mihomo
+inputs, original credentials, SNI, verification policy, and other clients' REALITY
+settings are retained. Every changed configuration must pass a fresh connection
+check. This option does not resolve every provider's REALITY incompatibility.
+See Mihomo's [TLS options](https://wiki.metacubex.one/en/config/proxies/tls/)
+and [XHTTP transport options](https://wiki.metacubex.one/en/config/proxies/transport/#xhttp-opts).
+Mihomo also documents REALITY compatibility limitations with Xray servers from
+v26.7.11 onward. A valid conversion cannot guarantee a successful handshake with
+every server/core combination; publication still requires that client's own
+passing connection check.
+
+Native Xray VLESS XHTTP `packet-up` configurations also have a Mihomo-specific
+adapter for verified advanced options: upload method/data placement, headers,
+padding, session/sequence placement, request size/interval ranges, and XMUX reuse.
+It preserves Xray's `extra` precedence and effective defaults. A redundant
+`sessionIDPlacement` or `sessionIDKey` is accepted only when it exactly matches
+the corresponding canonical setting. `scMaxBufferedPosts` is server-only and
+has no effect on the outbound connection; this is reported in conversion notes.
+Unknown fields, separate download settings, ambiguous aliases, and advanced
+query paths retain their original configuration. This adapter adds only Mihomo;
+existing Xray/Hiddify outputs, source identities, and provider samples stay stable.
+New Mihomo variants publish only after their own connection checks pass.
+
 ### Hysteria details
 
 Supported exports preserve authentication, IPv6, TLS server name and verification,
@@ -240,6 +326,15 @@ ALPN, supported obfuscation, bandwidth, and port hopping. Hysteria2
 `user:password` authentication is retained. `hy2://` input is exported as
 `hysteria2://`. Hysteria v1 requires explicit upload/download bandwidth;
 Hysteria2 retains its defaults when bandwidth is absent.
+
+Xray Hysteria2 configurations with one `finalmask.udp` Salamander layer convert
+to Mihomo and Hiddify while preserving both the authentication password and the
+separate obfuscation password. TLS verification, server name, and ALPN are
+preserved. Existing source IDs and Xray configurations remain stable; new client
+variants require their own passing checks. Stacked masks, other mask algorithms,
+and Salamander/Gecko packet-size options stay in the original Xray format.
+Provider sampling limits still apply, so only servers in the current selection
+enter checks and publication.
 
 Certificate-pinned Hysteria2 nodes are checked with Mihomo and retain
 `pinSHA256`. Conversions without an equivalent certificate pin are excluded.
@@ -324,6 +419,16 @@ current passing results remain available. A client-specific feed returns HTTP 50
 when it has no passing compatible nodes. The combined archive can describe an empty
 library. Unpublished, incompatible or invalidated snapshots remain unavailable.
 Failed nodes remain in the inventory and can return after a later successful check.
+
+### Inspect a server's configuration
+
+In **Server library**, select a server name or **View configuration** to open its
+detail panel. It shows the address, port, transport, TLS settings, and connection
+results. Use the format selector to view the original settings or an available
+Mihomo, Xray, or Hiddify/sing-box version, then **Copy configuration** or **Download**.
+Client versions contain this server and its dependencies, not a complete client
+profile. Failed servers can also be inspected. **Previous** and **Next** follow
+the displayed, filtered list; closing the panel preserves your filters and position.
 
 ### Understand counts and resource use
 

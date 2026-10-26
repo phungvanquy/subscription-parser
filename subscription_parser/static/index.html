@@ -7,6 +7,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/app.js" defer></script>
+  <script src="/static/server-policy.js" defer></script>
 </head>
 <body>
   <section id="login-view" class="login-view" hidden>
@@ -93,6 +94,7 @@
               <div class="subscription-health"><span id="subscription-status" class="subscription-status"></span><p id="subscription-summary"></p></div>
               <div class="subscription-metrics"><div><strong id="subscription-published">0</strong><span>Included servers</span></div><div><strong id="subscription-excluded">0</strong><span>Not included</span></div><div><strong id="subscription-active-providers">0</strong><span id="subscription-provider-metric">Active providers</span></div></div>
               <section class="subscription-sources" aria-labelledby="subscription-sources-title"><div class="detail-section-heading"><h3 id="subscription-sources-title">Providers</h3><span id="subscription-scope"></span></div><div id="subscription-providers-summary" class="provider-chips"></div></section>
+              <section class="subscription-sources" aria-labelledby="subscription-servers-title"><div class="detail-section-heading"><h3 id="subscription-servers-title">Servers &amp; overrides</h3><button id="customize-subscription" class="button secondary small">Choose servers</button></div><p id="subscription-server-summary" class="hint">All working servers from the selected providers.</p></section>
               <section class="subscription-formats" aria-labelledby="subscription-formats-title"><div class="detail-section-heading"><h3 id="subscription-formats-title">Import links</h3><label class="url-toggle"><input type="checkbox" id="show-subscription-urls">Show URLs</label></div><p class="format-help">Choose your client, copy its link, then import it as a subscription.</p><div id="export-cards" class="format-list"></div></section>
               <div id="subscription-empty-notice" class="subscription-empty-notice" hidden><span data-icon="info"></span><p>No passing servers are available yet. Check the selected providers and connection results in the server library.</p></div>
               <p class="subscription-footnote"><span data-icon="refresh"></span>Links stay the same when providers refresh or your selection changes.</p>
@@ -101,7 +103,7 @@
         </section>
 
         <section id="servers-section" class="panel page-section" hidden>
-          <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Only recently passing nodes appear in subscription links. Failed nodes stay here for retries.</p></div><button id="check-servers" class="button secondary small"><span data-icon="network"></span>Check servers</button></div>
+          <div class="panel-heading"><div><h2>Server library <span id="server-total" class="count-pill">0</span></h2><p>Open a server to inspect or copy its configuration. Only recently passing servers appear in subscription links.</p></div><button id="check-servers" class="button secondary small"><span data-icon="network"></span>Check servers</button></div>
           <div class="notice info"><p id="connection-summary">HTTPS checks run from this server through Mihomo, Xray and Hiddify.</p></div>
           <div class="filters"><input id="server-search" type="search" placeholder="Search servers or providers…" aria-label="Search servers"><select id="provider-filter" aria-label="Filter provider"><option value="">All providers</option></select><select id="protocol-filter" aria-label="Filter protocol"><option value="">All protocols</option></select><select id="client-filter" aria-label="Filter client"><option value="">All clients</option><option value="hiddify">Hiddify</option><option value="mihomo">Mihomo</option><option value="xray">Xray</option><option value="v2board">V2Board JSON</option><option value="v2board_uri">V2Board URI</option></select><select id="connection-filter" aria-label="Filter connection status"><option value="">All results</option><option value="passing">Passing</option><option value="excluded">Excluded</option></select></div>
           <div class="table-scroll"><table><thead><tr><th>SERVER</th><th>PROTOCOL</th><th>PROVIDER</th><th>MIHOMO CHECK</th><th>XRAY CHECK</th><th>HIDDIFY CHECK</th><th>PASSING FORMATS</th></tr></thead><tbody id="server-rows"></tbody></table></div><div class="panel-footer"><span id="server-shown"></span><span>HTTPS response time · Results reflect this server’s network</span></div>
@@ -143,6 +145,19 @@
   </form></dialog>
   <dialog id="recovery-dialog" aria-labelledby="recovery-title"><div class="dialog-heading"><div><span class="eyebrow">SAVE THESE NOW</span><h2 id="recovery-title">Your recovery codes</h2></div></div><p class="dialog-description">Keep these in a safe place separate from your admin key. Each code works once if you lose access to your authenticator. They are shown only here.</p><pre id="recovery-codes" tabindex="0"></pre><button type="button" class="button secondary" id="copy-recovery">Copy all codes</button><p class="hint">Previous sessions have been signed out. Any older recovery codes no longer work.</p><div class="dialog-actions"><button type="button" class="button primary" data-close="recovery-dialog">I saved my codes</button></div></dialog>
 
+  <dialog id="server-dialog" aria-labelledby="server-detail-name">
+    <div class="server-detail-header"><div class="dialog-heading"><div><span class="eyebrow">SERVER CONFIGURATION</span><h2 id="server-detail-name" tabindex="-1"></h2></div><button type="button" class="icon-button" data-close="server-dialog" aria-label="Close server configuration">×</button></div><div class="server-detail-meta"><span id="server-detail-protocol" class="protocol-chip"></span><span id="server-detail-sources"></span></div></div>
+    <div id="server-detail-body" class="server-detail-body">
+      <p id="server-detail-message" class="hint" role="status"></p><button id="server-detail-retry" class="text-button" hidden>Try again</button>
+      <div id="server-detail-content" hidden>
+        <dl id="server-detail-fields" class="server-detail-fields"></dl>
+        <section class="server-detail-health" aria-labelledby="server-checks-title"><h3 id="server-checks-title">Connection checks</h3><div id="server-detail-checks"></div><p id="server-detail-inclusion" class="hint"></p></section>
+        <section class="server-configuration" aria-labelledby="server-config-title"><div class="server-config-heading"><h3 id="server-config-title">Configuration</h3><select id="server-config-format" aria-label="Configuration format"></select></div><p id="server-config-description" class="hint"></p><pre id="server-config-code" tabindex="0" aria-label="Server configuration"><code id="server-config-text"></code></pre></section>
+      </div>
+    </div>
+    <div class="server-detail-footer"><div id="server-config-actions" class="server-config-actions" hidden><span id="server-config-feedback" role="status"></span><button id="server-config-download" class="button secondary small"><span data-icon="download"></span>Download</button><button id="server-config-copy" class="button primary small"><span data-icon="copy"></span>Copy configuration</button></div><div class="server-detail-navigation"><span id="server-detail-position"></span><div><button id="server-detail-previous" class="button secondary small"><span aria-hidden="true">←</span>Previous</button><button id="server-detail-next" class="button secondary small">Next<span aria-hidden="true">→</span></button></div></div></div>
+  </dialog>
+
   <dialog id="subscription-dialog"><form id="subscription-form">
     <div class="dialog-heading"><div><span class="eyebrow">OUTPUT SUBSCRIPTION</span><h2 id="subscription-dialog-title">New subscription</h2></div><button type="button" class="icon-button" data-close="subscription-dialog" aria-label="Close">×</button></div>
     <input type="hidden" id="subscription-id">
@@ -153,6 +168,38 @@
     <p id="subscription-selection-summary" class="selection-summary" aria-live="polite"></p><p class="hint">Only enabled providers contribute servers. Your import links stay the same when you edit this selection.</p>
     <div id="subscription-error" class="form-error" role="alert"></div>
     <div class="dialog-actions"><button type="button" class="button secondary" data-close="subscription-dialog">Cancel</button><button type="submit" class="button primary" id="save-subscription">Save subscription</button></div>
+  </form></dialog>
+
+  <dialog id="policy-dialog" aria-labelledby="policy-title"><form id="policy-form" novalidate>
+    <div class="dialog-heading"><div><span class="eyebrow">SUBSCRIPTION SERVERS</span><h2 id="policy-title">Choose servers</h2></div><button type="button" class="icon-button" data-close="policy-dialog" aria-label="Close server selection">×</button></div>
+    <div class="policy-editor-body">
+    <p class="dialog-description" id="policy-description"></p>
+    <div class="policy-settings"><div><label for="policy-mode">Servers to include</label><select id="policy-mode"><option value="all">All working servers</option><option value="selected">Only selected servers</option></select></div><p class="hint">Only working servers are published. Your saved selections and edits stay here when a source disappears.</p></div>
+    <div id="policy-loading" class="hint" role="status">Loading servers…</div>
+    <button id="policy-retry" type="button" class="text-button" hidden>Reload servers</button>
+    <div id="policy-content" hidden>
+      <div class="policy-tabs" role="tablist" aria-label="Subscription servers"><button type="button" id="policy-tab-saved" role="tab" aria-controls="policy-saved-panel" aria-selected="true">Saved servers <span id="policy-tab-count">0</span></button><button type="button" id="policy-tab-available" role="tab" aria-controls="policy-available-panel" aria-selected="false" tabindex="-1">Add servers</button></div>
+      <section id="policy-saved-panel" class="policy-section" role="tabpanel" aria-labelledby="policy-tab-saved">
+        <div class="policy-list-tools">
+          <div class="policy-filters"><label class="sr-only" for="policy-saved-search">Search saved servers</label><input id="policy-saved-search" type="search" placeholder="Search names, addresses or ports…"><label class="sr-only" for="policy-provider-filter">Filter saved servers by provider</label><select id="policy-provider-filter"><option value="">All providers</option></select><label class="sr-only" for="policy-status-filter">Filter saved servers</label><select id="policy-status-filter"><option value="">All saved servers</option><option value="selected">Selected</option><option value="unselected">Not selected</option><option value="overrides">With overrides</option><option value="unavailable">Source unavailable</option><option value="source_failed">Source check failed</option><option value="pending_or_failed">Custom checks pending / failed</option><option value="working">Working</option><option value="unsaved">Edited</option></select></div>
+          <div class="policy-list-actions"><span id="policy-saved-count" role="status"></span><div id="policy-bulk-selection"><button type="button" class="text-button" id="policy-include-matches">Include matches</button><button type="button" class="text-button" id="policy-exclude-matches">Exclude matches</button></div></div>
+          <div class="policy-pagination"><span id="policy-saved-page"></span><div class="policy-page-buttons"><button type="button" class="button secondary small" id="policy-saved-previous">Previous</button><select id="policy-saved-page-select" aria-label="Saved servers page"></select><button type="button" class="button secondary small" id="policy-saved-next">Next</button></div></div>
+        </div>
+        <table class="policy-table" aria-label="Saved servers"><thead><tr><th scope="col">Include</th><th scope="col">Server / provider</th><th scope="col">Address / port</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Edit server</span></th></tr></thead><tbody id="policy-records"></tbody></table>
+        <p id="policy-saved-empty" class="hint policy-empty" hidden></p>
+      </section>
+      <section id="policy-available-panel" class="policy-section" role="tabpanel" aria-labelledby="policy-tab-available" hidden>
+        <div id="policy-relink-notice" class="policy-relink-notice" hidden><p id="policy-relink-label"></p><button type="button" class="text-button" id="policy-cancel-relink">Cancel relinking</button></div>
+        <div class="policy-list-tools">
+          <label class="sr-only" for="policy-available-search">Search available servers</label><input id="policy-available-search" type="search" placeholder="Search providers, names or addresses…">
+          <div class="policy-list-actions"><span class="hint">Choose from your providers’ current working servers.</span><div><button type="button" class="text-button" id="policy-refresh">Refresh list</button><button type="button" class="text-button" id="policy-add-page">Add this page</button></div></div>
+          <div class="policy-pagination"><span id="policy-available-page"></span><div class="policy-page-buttons"><button type="button" class="button secondary small" id="policy-available-previous">Previous</button><button type="button" class="button secondary small" id="policy-available-next">Next</button></div></div>
+        </div>
+        <div id="policy-available" class="policy-available"></div>
+      </section>
+    </div>
+    </div>
+    <div class="dialog-actions"><div class="policy-footer-message"><span class="hint">Changes apply when you save.</span><div id="policy-error" class="form-error" role="alert"></div></div><button type="button" class="button secondary" data-close="policy-dialog">Cancel</button><button type="submit" class="button primary" id="policy-save" disabled>Save server settings</button></div>
   </form></dialog>
 
   <dialog id="provider-dialog"><form id="provider-form">

@@ -7,6 +7,17 @@ MAX_PROVIDERS = 200
 MAX_PROVIDER_SERVERS = 100000
 
 
+def env_bool(name, default=False):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value.lower() in {'true', '1'}:
+        return True
+    if value.lower() in {'false', '0'}:
+        return False
+    raise SubscriptionError(f'{name} must be true or false')
+
+
 def env_int(name, default, minimum, maximum):
     value = os.environ.get(name)
     if value is None:

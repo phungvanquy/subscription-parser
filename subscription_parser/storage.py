@@ -15,7 +15,13 @@ from . import common
 from .config import MAX_PROVIDER_SERVERS, admin_key
 from .auth import AUTH_SCHEMA
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
+SERVER_POLICIES_SCHEMA = """CREATE TABLE IF NOT EXISTS subscription_server_policies (
+    subscription_id TEXT PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    all_servers INTEGER NOT NULL CHECK(all_servers IN (0, 1)),
+    records TEXT NOT NULL
+);"""
 CREDENTIALS_SCHEMA = """CREATE TABLE credentials (
     name TEXT PRIMARY KEY CHECK(name = 'subscription_token'),
     value TEXT NOT NULL CHECK(length(value) > 0)
@@ -56,7 +62,7 @@ CREATE TABLE settings (
     refresh_seconds INTEGER NOT NULL CHECK(refresh_seconds BETWEEN 300 AND 86400),
     check_seconds INTEGER NOT NULL DEFAULT 600 CHECK(check_seconds BETWEEN 300 AND 86400)
 );
-""" + AUTH_SCHEMA
+""" + AUTH_SCHEMA + SERVER_POLICIES_SCHEMA
 PROVIDER_INSERT = ('INSERT INTO providers '
                    '(id, name, url, hwid_id, user_agent, enabled, position, server_limit) '
                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
@@ -114,6 +120,8 @@ class Store:
                 self._migrate_auth()
             if version in {1, 2, 3, 4, 5, 6}:
                 self._migrate_server_limits()
+            if version in {1, 2, 3, 4, 5, 6, 7}:
+                self._migrate_server_policies()
             with self.connection() as connection:
                 if connection.execute('PRAGMA user_version').fetchone()[0] != SCHEMA_VERSION:
                     raise common.SubscriptionError('unsupported application database version')
@@ -245,6 +253,14 @@ class Store:
                                        'CHECK(server_limit IS NULL OR server_limit BETWEEN 1 AND 100000)')
                 connection.execute('PRAGMA user_version = 7')
 
+    def _migrate_server_policies(self):
+        with common.process_lock(self.directory / 'app.lock'):
+            with self.connection(write=True) as connection:
+                if connection.execute('PRAGMA user_version').fetchone()[0] != 7:
+                    return
+                connection.execute(SERVER_POLICIES_SCHEMA)
+                connection.execute('PRAGMA user_version = 8')
+
     def _initialize(self):
         env, hwids, config, sources = self._legacy_inputs()
         # Publish a complete database with one atomic rename. Failed migrations
@@ -333,7 +349,11 @@ class Store:
 
     @staticmethod
     def _subscription(connection, row):
-        return dict(row) | {'all_providers': bool(row['all_providers']), 'provider_ids': [p[0] for p in
+        policy = connection.execute('SELECT revision, all_servers FROM subscription_server_policies '
+                                    'WHERE subscription_id = ?', (row['id'],)).fetchone()
+        return dict(row) | {'server_policy': {'revision': policy['revision'], 'all_servers': bool(policy['all_servers'])}
+                           if policy else {'revision': 0, 'all_servers': True},
+            'all_providers': bool(row['all_providers']), 'provider_ids': [p[0] for p in
             connection.execute('SELECT provider_id FROM subscription_providers WHERE subscription_id = ? ORDER BY provider_id',
                                (row['id'],))]}
 
@@ -348,6 +368,42 @@ class Store:
         with self.connection() as connection:
             row = connection.execute('SELECT * FROM subscriptions WHERE token = ?', (token,)).fetchone()
             return self._subscription(connection, row) if row else None
+
+    def subscription(self, identifier):
+        with self.connection() as connection:
+            row = connection.execute('SELECT * FROM subscriptions WHERE id = ?', (identifier,)).fetchone()
+            if not row:
+                raise common.SubscriptionError('subscription does not exist')
+            return self._subscription(connection, row)
+
+    def server_policies(self):
+        with self.connection() as connection:
+            return {row['subscription_id']: {'revision': row['revision'], 'all_servers': bool(row['all_servers']),
+                    'records': json.loads(row['records'])}
+                    for row in connection.execute('SELECT * FROM subscription_server_policies')}
+
+    def server_policy(self, identifier):
+        with self.connection() as connection:
+            if not connection.execute('SELECT 1 FROM subscriptions WHERE id = ?', (identifier,)).fetchone():
+                raise common.SubscriptionError('subscription does not exist')
+            row = connection.execute('SELECT * FROM subscription_server_policies WHERE subscription_id = ?',
+                                     (identifier,)).fetchone()
+            return {'revision': row['revision'], 'all_servers': bool(row['all_servers']),
+                    'records': json.loads(row['records'])} if row else {'revision': 0, 'all_servers': True, 'records': []}
+
+    def save_server_policy(self, identifier, revision, all_servers, records):
+        with self.connection(write=True) as connection:
+            if not connection.execute('SELECT 1 FROM subscriptions WHERE id = ?', (identifier,)).fetchone():
+                raise common.SubscriptionError('subscription does not exist')
+            old = connection.execute('SELECT revision FROM subscription_server_policies WHERE subscription_id = ?',
+                                     (identifier,)).fetchone()
+            if (old['revision'] if old else 0) != revision:
+                raise common.SubscriptionError('server selection changed; reopen the editor before saving')
+            connection.execute('INSERT INTO subscription_server_policies VALUES (?, ?, ?, ?) '
+                'ON CONFLICT(subscription_id) DO UPDATE SET revision=excluded.revision, '
+                'all_servers=excluded.all_servers, records=excluded.records',
+                (identifier, revision + 1, int(all_servers), common.json_text(records)))
+        return revision + 1
 
     def save_subscription(self, values, identifier=None):
         name = values['name'].strip()

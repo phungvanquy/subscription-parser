@@ -71,6 +71,7 @@ The app never rewrites this file.
 | `PARSER_FETCH_TIMEOUT_SECONDS` | `30` | Total deadline per provider download, including DNS, redirects, retries and response bodies; from 1 to 120 seconds. |
 | `PARSER_CHECK_WORKERS` | `8` | Concurrent isolated client-core checks, from 1 to 128. |
 | `PARSER_CHECK_BATCH_SECONDS` | `60` | Check-batch budget before saving results and publishing; from 1 to 300 seconds. Running cores may need a few extra seconds to terminate. |
+| `PARSER_MIHOMO_REALITY_COMPATIBILITY` | `false` | Use Chrome fingerprint and X25519-MLKEM768 in generated Mihomo VLESS REALITY configurations. Native Mihomo inputs and other client outputs retain their settings. Accepts `true`/`false` or `1`/`0`. |
 
 Compose sets `PARSER_DATA_DIR=/data` and
 `PARSER_TOOLS_DIR=/opt/client-cores` inside the container. HWIDs, provider URLs,
@@ -83,6 +84,10 @@ docker compose up -d --wait
 ```
 
 A plain `docker compose restart` keeps the container's existing environment.
+Changing the Mihomo compatibility option queues checks of cached configurations
+after restart. Newly generated variants require their own passing checks before
+publication; source identities, provider samples, and saved server selections stay
+stable. Disable the option and recreate the service to restore source fingerprints.
 Changing the admin key revokes existing sessions while retaining the enrolled
 authenticator and saved subscriptions.
 

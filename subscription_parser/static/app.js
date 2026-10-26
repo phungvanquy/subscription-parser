@@ -32,6 +32,7 @@ const subscriptionCollator=new Intl.Collator(undefined,{numeric:true,sensitivity
 let securityAction='setup',securityWorking=false,securityRequest=0;
 let providerOriginal=null,providerWorking=false,testRuns=new Map(),savedRuns=new Set(),editingDevice=null,replacementDevice=null,revealTimer;
 let providerPage=0;
+let serverDetail=null,serverDetailId=null,serverDetailOrigin=null,serverDetailRequest=0,serverDetailIds=[];
 const expandedProviders=new Set();
 const titles={
   overview:['YOUR WORKSPACE','Overview','Your providers, connection checks and subscriptions at a glance.','Overview'],
@@ -273,6 +274,10 @@ function providerSummary(subscription){
   const providers=subscriptionProviders(subscription);
   return providers.length?providers.map(p=>p.name).join(', '):'No providers selected';
 }
+function subscriptionProviderTag(name,tone){
+  const status=tone==='active'?'Active':tone==='paused'?'Paused':'No providers available';
+  return `<span class="subscription-provider-tag ${tone}" title="${esc(`${name} · ${status}`)}">${tone==='paused'?icon('pause'):`<span class="subscription-dot ${tone==='active'?'ready':'paused'}" aria-hidden="true"></span>`}<span class="subscription-provider-tag-name">${esc(name)}</span><span class="sr-only"> · ${status}</span></span>`;
+}
 function subscriptionMatches(){
   const query=$('subscription-search').value.trim().toLocaleLowerCase(),filter=$('subscription-status-filter').value,sort=$('subscription-sort').value;
   const byId=new Map(state.providers.map(p=>[p.id,p]));
@@ -295,7 +300,10 @@ function renderSubscriptionList(){
   const focused=document.activeElement?.closest('#subscription-list button'),focusAttribute=focused?.hasAttribute('data-subscription-id')?'data-subscription-id':'data-open-subscription',focusedId=focused?.getAttribute(focusAttribute);
   setHTML('subscription-list',visible.map(({subscription:s,providers,status})=>{
     const active=providers.filter(p=>p.enabled).length;
-    return `<tr class="subscription-row ${s.id===selectedSubscription?'selected':''}"><td class="subscription-name-cell"><button class="subscription-open" data-subscription-id="${esc(s.id)}" ${s.id===selectedSubscription?'aria-current="true"':''} title="${esc(s.name)}"><span>${esc(s.name)}</span>${s.id==='default'?'<span class="original-badge">Original</span>':''}</button></td><td class="subscription-provider-cell"><strong>${s.all_providers?'All providers':`${providers.length} provider${providers.length===1?'':'s'}`}</strong><small>${active} active</small></td><td class="subscription-status-cell"><span class="subscription-status ${status.tone}">${status.label}</span></td><td class="subscription-server-cell"><strong>${s.published_total} <span>included</span></strong><small>${s.total} total</small></td><td class="subscription-link-cell"><button class="text-button subscription-view" data-open-subscription="${esc(s.id)}" aria-label="View links for ${esc(s.name)}"><span>View links</span>${icon('chevron')}</button></td></tr>`;
+    const all=s.all_providers||(providers.length>0&&providers.length===state.providers.length),paused=providers.length-active;
+    const tags=all?subscriptionProviderTag('All providers',active?'active':providers.length?'paused':'empty'):providers.map(p=>subscriptionProviderTag(p.name,p.enabled?'active':'paused')).join('');
+    const summary=all?`<small>${providers.length?`${active} active${paused?` · ${paused} paused`:''}`:'No providers available'}</small>`:'';
+    return `<tr class="subscription-row ${s.id===selectedSubscription?'selected':''}"><td class="subscription-name-cell"><button class="subscription-open" data-subscription-id="${esc(s.id)}" ${s.id===selectedSubscription?'aria-current="true"':''} title="${esc(s.name)}"><span>${esc(s.name)}</span>${s.id==='default'?'<span class="original-badge">Original</span>':''}</button></td><td class="subscription-provider-cell"><div class="subscription-provider-tags">${tags||'<span class="subscription-provider-empty">No providers selected</span>'}</div>${summary}</td><td class="subscription-status-cell"><span class="subscription-status ${status.tone}">${status.label}</span></td><td class="subscription-server-cell"><strong>${s.published_total} <span>included</span></strong><small>${s.total} total</small></td><td class="subscription-link-cell"><button class="text-button subscription-view" data-open-subscription="${esc(s.id)}" aria-label="View links for ${esc(s.name)}"><span>View links</span>${icon('chevron')}</button></td></tr>`;
   }).join(''));
   $('subscriptions-no-results').hidden=matches.length>0;
   $('subscription-table-wrap').hidden=!matches.length;
@@ -324,6 +332,10 @@ function renderSubscriptions(){
   $('subscription-scope').textContent=subscription.all_providers?'New providers join automatically':'Selected providers only';
   setHTML('subscription-providers-summary',providers.map(p=>`<span class="provider-chip ${p.enabled?'':'paused'}"><span class="subscription-dot ${p.enabled?'ready':'paused'}"></span><span>${esc(p.name)}</span>${p.enabled?'':'<small>Paused</small>'}</span>`).join('')||'<p class="no-sources">No providers selected. Use Edit to add a source.</p>');
   $('add-subscription').disabled=state.busy;$('edit-subscription').disabled=state.busy;
+  $('customize-subscription').disabled=state.busy;
+  $('subscription-server-summary').textContent=subscription.server_policy?.all_servers===false||subscription.server_policy?.all_servers===0
+    ?'Only your saved, selected servers are included when their checks pass.'
+    :'All working servers from the selected providers, with any saved overrides.';
   $('delete-subscription').disabled=state.busy||subscription.id==='default';
   $('original-subscription-note').hidden=subscription.id!=='default';
   $('subscription-empty-notice').hidden=!!subscription.published_total;
@@ -406,17 +418,89 @@ $('delete-subscription').addEventListener('click',async()=>{
 function connectionCell(value){
   const status=value?.status||'pending',label={passed:'Passed',failed:'Failed',unsupported:'Unsupported',error:'Check error',pending:'Pending',stale:'Expired'}[status]||status;
   const color=status==='passed'?'fresh':status==='failed'?'unavailable':status==='error'?'cached':'pending';
-  return `<span class="status-pill ${color}" title="${esc(value?.reason||'HTTPS request passed')}">${esc(label)}${status==='passed'?` · ${esc(value.latency_ms)} ms`:''}</span><small class="connection-time" ${!value?.reason&&value?.checked_at?`data-checked-at="${esc(value.checked_at)}"`:''} title="${esc(value?.checked_at||'')}">${esc(value?.reason||relative(value?.checked_at))}</small>`;
+  return `<span class="status-pill ${color}" title="${esc(value?.reason||(status==='passed'?'HTTPS request passed':label))}">${esc(label)}${status==='passed'?` · ${esc(value.latency_ms)} ms`:''}</span><small class="connection-time" ${!value?.reason&&value?.checked_at?`data-checked-at="${esc(value.checked_at)}"`:''} title="${esc(value?.checked_at||'')}">${esc(value?.reason||relative(value?.checked_at))}</small>`;
+}
+function serverMatches(){
+  if(!state)return [];
+  const text=$('server-search').value.toLowerCase(),protocol=$('protocol-filter').value,client=$('client-filter').value,connection=$('connection-filter').value;
+  const provider=state.providers.find(p=>p.id===$('provider-filter').value);
+  return state.inventory.filter(n=>(!provider||n.sources.includes(provider.name))&&(!text||`${n.name} ${n.sources.join(' ')}`.toLowerCase().includes(text))&&(!protocol||n.protocol===protocol)&&(!client||n.clients.includes(client))&&(!connection||(connection==='passing'?n.clients.length>0:n.clients.length===0)));
 }
 function renderServers(){
   if(!state)return;
-  const text=$('server-search').value.toLowerCase(),protocol=$('protocol-filter').value,client=$('client-filter').value,connection=$('connection-filter').value;
-  const provider=state.providers.find(p=>p.id===$('provider-filter').value);
-  const rows=state.inventory.filter(n=>(!provider||n.sources.includes(provider.name))&&(!text||`${n.name} ${n.sources.join(' ')}`.toLowerCase().includes(text))&&(!protocol||n.protocol===protocol)&&(!client||n.clients.includes(client))&&(!connection||(connection==='passing'?n.clients.length>0:n.clients.length===0)));
+  const rows=serverMatches(),focused=document.activeElement?.dataset.serverId;
   $('server-total').textContent=state.total;
-  $('server-rows').innerHTML=rows.slice(0,1000).map(n=>`<tr><td class="provider-name">${esc(n.name)}</td><td><span class="protocol-chip">${esc(n.protocol)}</span></td><td>${esc(n.sources.join(', '))}</td><td>${connectionCell(n.connectivity?.mihomo)}</td><td>${connectionCell(n.connectivity?.xray)}</td><td>${connectionCell(n.connectivity?.hiddify)}</td><td>${n.clients.map(c=>`<span class="client-badge">${esc(c==='hiddify'?'Hiddify':c==='mihomo'?'Mihomo':c==='v2board'?'V2Board JSON':c==='v2board_uri'?'V2Board URI':'Xray')}</span>`).join('')||'<span class="status-pill pending">Excluded</span>'}</td></tr>`).join('')||'<tr><td colspan="7" class="empty-small">No servers match these filters.</td></tr>';
+  setHTML('server-rows',rows.slice(0,1000).map(n=>`<tr><td class="provider-name"><button class="server-open" data-server-id="${esc(n.id)}" aria-label="View configuration for ${esc(n.name)}" aria-haspopup="dialog"><span>${esc(n.name)}</span><small>View configuration ${icon('chevron')}</small></button></td><td><span class="protocol-chip">${esc(n.protocol)}</span></td><td>${esc(n.sources.join(', '))}</td><td>${connectionCell(n.connectivity?.mihomo)}</td><td>${connectionCell(n.connectivity?.xray)}</td><td>${connectionCell(n.connectivity?.hiddify)}</td><td>${n.clients.map(c=>`<span class="client-badge">${esc(c==='hiddify'?'Hiddify':c==='mihomo'?'Mihomo':c==='v2board'?'V2Board JSON':c==='v2board_uri'?'V2Board URI':'Xray')}</span>`).join('')||'<span class="status-pill pending">Excluded</span>'}</td></tr>`).join('')||'<tr><td colspan="7" class="empty-small">No servers match these filters.</td></tr>');
+  if(focused)serverButton(focused)?.focus({preventScroll:true});
   $('server-shown').textContent=`Showing ${Math.min(rows.length,1000)} of ${state.total} servers`;
+  if($('server-dialog').open){
+    const current=state.inventory.find(n=>n.id===serverDetailId);
+    if(!current){serverDetailRequest++;clearServerConfiguration();$('server-detail-message').textContent='This server is no longer in the library. Close this panel or choose another server.';}
+    else renderServerHealth(current);
+  }
 }
+function serverButton(id){return [...$('server-rows').querySelectorAll('[data-server-id]')].find(button=>button.dataset.serverId===id);}
+function clearServerConfiguration(){
+  serverDetail=null;$('server-detail-content').hidden=true;$('server-detail-fields').replaceChildren();
+  $('server-config-text').textContent='';$('server-config-format').replaceChildren();$('server-config-feedback').textContent='';
+  $('server-config-copy').disabled=true;$('server-config-download').disabled=true;$('server-config-actions').hidden=true;$('server-detail-retry').hidden=true;
+}
+function renderServerHealth(server){
+  $('server-detail-checks').innerHTML=[['mihomo','Mihomo'],['xray','Xray'],['hiddify','Hiddify']].map(([key,label])=>`<div><strong>${label}</strong>${connectionCell(server.connectivity?.[key])}</div>`).join('');
+  $('server-detail-inclusion').textContent=server.clients.length?'Passing formats: '+server.clients.map(c=>({hiddify:'Hiddify',mihomo:'Mihomo',xray:'Xray',v2board:'V2Board JSON',v2board_uri:'V2Board URI'}[c]||c)).join(', '):'Excluded from subscription links. You can still inspect its configuration.';
+}
+async function loadServerDetail(id){
+  const server=state?.inventory.find(n=>n.id===id),request=++serverDetailRequest;
+  serverDetailId=id;clearServerConfiguration();
+  $('server-detail-name').textContent=server?.name||'Server unavailable';
+  $('server-detail-protocol').textContent=server?.protocol||'';$('server-detail-sources').textContent=server?.sources.join(', ')||'';
+  const position=serverDetailIds.indexOf(id);
+  $('server-detail-position').textContent=`${position+1} of ${serverDetailIds.length} servers`;
+  $('server-detail-previous').disabled=position<=0;$('server-detail-next').disabled=position>=serverDetailIds.length-1;
+  $('server-detail-message').textContent='Loading configuration…';$('server-detail-body').scrollTop=0;
+  if(!server){$('server-detail-message').textContent='This server is no longer in the library. Choose another server or close this panel.';return;}
+  try{
+    const detail=await api('/servers/'+encodeURIComponent(id));
+    if(request!==serverDetailRequest||!$('server-dialog').open||!state)return;
+    serverDetail=detail;$('server-detail-message').textContent='';
+    $('server-detail-fields').innerHTML=detail.fields.map(field=>`<div><dt>${esc(field.label)}</dt><dd>${esc(field.value)}</dd></div>`).join('');
+    renderServerHealth(state.inventory.find(n=>n.id===id)||server);
+    $('server-config-format').innerHTML=detail.configurations.map(config=>`<option value="${esc(config.id)}">${esc(config.label)}</option>`).join('');
+    renderServerConfiguration();$('server-detail-content').hidden=false;
+  }catch(error){if(request===serverDetailRequest&&$('server-dialog').open){$('server-detail-message').textContent=error.message;$('server-detail-retry').hidden=false;}}
+}
+function selectedServerConfiguration(){return serverDetail?.configurations.find(config=>config.id===$('server-config-format').value);}
+function renderServerConfiguration(){
+  const config=selectedServerConfiguration();
+  $('server-config-text').textContent=config?.content||'';$('server-config-description').textContent=config?.description||'';
+  $('server-config-feedback').textContent='';$('server-config-code').scrollTop=0;$('server-config-code').scrollLeft=0;
+  $('server-config-copy').disabled=!config;$('server-config-download').disabled=!config;$('server-config-actions').hidden=!config;
+}
+$('server-rows').addEventListener('click',event=>{
+  const button=event.target.closest('[data-server-id]');if(!button)return;
+  serverDetailOrigin=button.dataset.serverId;serverDetailIds=serverMatches().slice(0,1000).map(n=>n.id);
+  $('server-detail-name').textContent=state.inventory.find(n=>n.id===serverDetailOrigin)?.name||'Server configuration';
+  $('server-dialog').showModal();$('server-detail-name').focus();loadServerDetail(serverDetailOrigin);
+});
+$('server-detail-previous').addEventListener('click',()=>loadServerDetail(serverDetailIds[serverDetailIds.indexOf(serverDetailId)-1]));
+$('server-detail-next').addEventListener('click',()=>loadServerDetail(serverDetailIds[serverDetailIds.indexOf(serverDetailId)+1]));
+$('server-detail-retry').addEventListener('click',()=>loadServerDetail(serverDetailId));
+$('server-config-format').addEventListener('change',renderServerConfiguration);
+$('server-config-copy').addEventListener('click',async()=>{
+  const config=selectedServerConfiguration();if(!config)return;
+  try{await copy(config.content);if(config===selectedServerConfiguration())$('server-config-feedback').textContent='Configuration copied';}
+  catch{if(config===selectedServerConfiguration())$('server-config-feedback').textContent='Select the configuration text to copy it manually.';}
+});
+$('server-config-download').addEventListener('click',()=>{
+  const config=selectedServerConfiguration();if(!config)return;
+  const url=URL.createObjectURL(new Blob([config.content],{type:'text/plain;charset=utf-8'})),link=document.createElement('a');
+  link.href=url;link.download=config.filename;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+});
+$('server-dialog').addEventListener('close',()=>{
+  serverDetailRequest++;clearServerConfiguration();serverDetailId=null;serverDetailIds=[];
+  if(state&&page==='servers')(serverButton(serverDetailOrigin)||$('server-search')).focus({preventScroll:true});
+  serverDetailOrigin=null;
+});
 function renderIssues(){if(!state)return;const client=$('issue-client').value,issues=state.diagnostics.filter(i=>!client||i.client===client);$('issue-total').textContent=issues.length;$('issue-rows').innerHTML=issues.slice(0,150).map(i=>`<div class="issue-row"><span class="issue-dot">!</span><div><strong>${esc(i.name)} <span class="provider-host">${esc(i.source)}</span></strong><p>${esc(i.reason)}</p></div><span class="issue-client">${esc(i.client)}</span></div>`).join('')||'<div class="empty-small">No compatibility exceptions for this selection.</div>';if(issues.length>150)$('issue-rows').insertAdjacentHTML('beforeend',`<div class="empty-small">Showing 150 of ${issues.length} notes. Download the combined archive for the full report.</div>`);}
 $('server-search').addEventListener('input',renderServers);$('protocol-filter').addEventListener('change',renderServers);$('client-filter').addEventListener('change',renderServers);$('issue-client').addEventListener('change',renderIssues);
 $('provider-filter').addEventListener('change',renderServers);
@@ -594,7 +678,7 @@ $('hwid-form').addEventListener('submit',async event=>{
   catch(error){$('hwid-error').textContent=error.message;}
   finally{button.disabled=false;}
 });
-async function copy(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const input=document.createElement('textarea');input.value=text;input.setAttribute('readonly','');document.body.appendChild(input);input.select();const success=document.execCommand('copy');input.remove();if(!success)throw new Error('Clipboard unavailable. Select and copy the subscription URL.');}
+async function copy(text){if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(text);return;}const input=document.createElement('textarea');input.value=text;input.setAttribute('readonly','');(document.querySelector('dialog[open]')||document.body).appendChild(input);input.select();const success=document.execCommand('copy');input.remove();if(!success)throw new Error('Clipboard unavailable. Select and copy the text manually.');}
 $('export-cards').addEventListener('click',async event=>{const button=event.target.closest('[data-copy]');if(!button)return;try{await copy(currentSubscription().links[button.dataset.copy]);toast('Subscription link copied');}catch(error){toast(error.message);}});
 $('rotate-links').addEventListener('click',async()=>{const subscription=currentSubscription();$('subscription-menu').open=false;if(!subscription||!confirm(`Rotate links for “${subscription.name}”? Only its existing links will stop working.`))return;try{await api('/subscriptions/'+encodeURIComponent(subscription.id)+'/rotate-link',{method:'POST'});await loadState();toast('New subscription links are ready');}catch(error){toast(error.message);}});
 $('schedule-form').addEventListener('submit',async event=>{event.preventDefault();try{await api('/settings',{method:'PUT',body:JSON.stringify({refresh_seconds:Number($('refresh-interval').value)})});await loadState();toast('Refresh schedule saved');}catch(error){toast(error.message);}});

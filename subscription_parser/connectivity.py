@@ -69,6 +69,11 @@ def matching_result(identity, target, key, results):
 def current_result(entry, target, results, max_age, now=None):
     if target not in entry.outputs:
         return result('unsupported', 'No compatible configuration for this core')
+    source = None
+    if entry.source_entry is not None:
+        source = current_result(entry.source_entry, target, results, max_age, now)
+        if source['status'] != 'passed':
+            return {**source, 'reason': 'Source server has no current passing check for this client'}
     try:
         key = fingerprint(entry, target)
     except protocols.Error:
@@ -82,6 +87,9 @@ def current_result(entry, target, results, max_age, now=None):
     checked = value.get('checked_ts', 0)
     if not 0 <= now - checked < max_age:
         return {**value, 'status': 'stale', 'reason': 'Connection check expired'}
+    if source is not None and value['status'] == 'passed':
+        # A variant expires as soon as either its source or its own check expires.
+        return {**value, 'checked_ts': min(source['checked_ts'], value['checked_ts'])}
     return value
 
 
@@ -233,7 +241,7 @@ def next_check_at(results, interval, now=None, *, batch_due=None):
 
 
 def check_entries(entries, root, *, stop=None, previous=None, progress=None, tester=probe,
-                  targets=None, reuse_seconds=0):
+                  targets=None, reuse_seconds=0, deadline=None):
     stop = stop or threading.Event()
     previous = previous or {}
     records, jobs, seen, visited = {}, [], set(), set()
@@ -276,7 +284,7 @@ def check_entries(entries, root, *, stop=None, previous=None, progress=None, tes
                 jobs.append((entry, core, key, record_id, cached))
     # Oldest/never-checked nodes go first so large lists cannot starve at the tail.
     jobs.sort(key=lambda job: job[4].get('checked_ts', 0))
-    deadline = time.monotonic() + budget
+    deadline = min(deadline, time.monotonic() + budget) if deadline is not None else time.monotonic() + budget
     def run(job):
         entry, core, key, record_id, cached = job
         if stop.is_set() or time.monotonic() >= deadline:

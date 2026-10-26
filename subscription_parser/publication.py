@@ -12,6 +12,10 @@ FILES = ('hiddify.json', 'mihomo.yaml', 'xray.json', 'v2board.json', 'v2board.tx
 
 
 def scope_key(subscription):
+    policy = subscription.get('server_policy', {})
+    if policy.get('revision'):
+        return hashlib.sha256(json.dumps([subscription['id'], policy['revision'], subscription['all_providers'],
+            sorted(subscription['provider_ids'])]).encode()).hexdigest()
     if subscription['all_providers']:
         return 'all'
     return hashlib.sha256(json.dumps(sorted(subscription['provider_ids'])).encode()).hexdigest()
