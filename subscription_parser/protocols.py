@@ -27,9 +27,9 @@ TARGETS = ("hiddify", "mihomo", "xray")
 
 
 def adapter_policy():
-    # Recheck cached sources after adapter changes without redrawing samples or
+    # Rebuild cached exports after adapter changes without redrawing samples or
     # changing server identities. Exact, unchanged core checks remain reusable.
-    return {"version": 3, "mihomo_reality_compatibility":
+    return {"version": 5, "mihomo_reality_compatibility":
             env_bool('PARSER_MIHOMO_REALITY_COMPATIBILITY')}
 
 
@@ -633,6 +633,7 @@ class Entry:
     identity: str = ""
     source_identity: str = ""
     source_entry: Entry | None = field(default=None, repr=False, compare=False)
+    pinned: bool = False
 
 
 def adapt(kind, raw, source, label, context=None, group_size=1):

@@ -41,6 +41,7 @@ class Manager:
         env_int('PARSER_CHECK_WORKERS', connectivity.WORKERS, 1, 128)
         env_int('PARSER_CHECK_BATCH_SECONDS', connectivity.BATCH_TIMEOUT, 1, 300)
         self.parsed_cache = {}
+        self.source_recovery_stamps = {}
         self.selection_cache = {}
         self.latest_selections = {}
         self.inflight_selections = set()
@@ -131,6 +132,7 @@ class Manager:
             self.snapshot['active_selections'] = active
             common.atomic_write(self.snapshot_path, common.json_text(self.snapshot))
         self.provider_statuses = dict(self.snapshot.get('providers', {}))
+        self.recover_saved_sources()
         if any(subscription.get('server_policy', {}).get('revision')
                and publication.scope_key(subscription) not in self.snapshot.get('publications', {})
                for subscription in self.store.subscriptions()):
@@ -321,10 +323,53 @@ class Manager:
         status.update(count=len(unique), protocols=dict(Counter(e.protocol for e in unique.values())))
         return entries, status
 
+    def recover_saved_sources(self):
+        """Upgrade legacy overrides using exact matches from complete cached responses."""
+        policies = self.store.server_policies()
+        needed = {}
+        for policy in policies.values():
+            for record in policy['records']:
+                if '_snapshot' not in record:
+                    needed.setdefault(record['provider_id'], set()).add(record['source_identity'])
+        snapshots, recovery_stamps = {}, {}
+        for provider in self.store.config()['providers'] if needed else []:
+            identifier = provider['id']
+            if identifier not in needed:
+                continue
+            paths = [self.store.directory / 'cache' / (identifier + '.json')]
+            generation = self.snapshot.get('active_selections', {}).get(identifier)
+            if generation:
+                paths.insert(0, self.selection_directory / (generation + '.json'))
+            fingerprint = self.request_fingerprint(provider)
+            stamps = tuple((str(path), self.cache_stamp(path)) for path in paths if path.exists())
+            signature = (frozenset(needed[identifier]), fingerprint, stamps)
+            if self.source_recovery_stamps.get(identifier) == signature:
+                continue
+            for path in paths:
+                try:
+                    cached = json.loads(common.read_limited(path, common.MAX_BYTES * 4 // 3 + 65536))
+                    if cached['fingerprint'] != fingerprint:
+                        continue
+                    entries = protocols.parse(base64.b64decode(cached['body'], validate=True), provider['name'])
+                    for entry in entries:
+                        key = server_policy.source_key(entry)
+                        if key in needed[identifier] and (identifier, key) not in snapshots:
+                            try:
+                                snapshots[identifier, key] = server_policy.freeze(entry)
+                            except common.SubscriptionError:
+                                continue
+                except (OSError, ValueError, KeyError, TypeError, common.SubscriptionError):
+                    continue
+            recovery_stamps[identifier] = signature
+        if self.store.remember_server_sources(snapshots):
+            policies = self.store.server_policies()
+        self.source_recovery_stamps.update(recovery_stamps)
+        return policies
+
     def prepare_scopes(self, config, by_provider, statuses, *, namespace='active'):
         enabled = [p for p in config['providers'] if p['enabled']]
         selections = {'all': enabled}
-        policies = self.store.server_policies()
+        policies = self.recover_saved_sources()
         scoped_policies = {}
         for subscription in self.store.subscriptions():
             key = publication.scope_key(subscription)
@@ -347,9 +392,10 @@ class Manager:
                 scopes[key] = cached[1]
                 continue
             # Validation removes outputs. Each selection owns its mutable entries.
-            nodes = server_policy.apply(by_provider, [p['id'] for p in providers], scoped_policies.get(key, {}))
+            nodes = server_policy.apply(by_provider, [p['id'] for p in providers], scoped_policies.get(key, {}),
+                                        {p['id']: p['name'] for p in providers})
             for node in nodes:
-                if node.source_entry is None:
+                if node.source_entry is None or node.pinned:
                     continue
                 if source_configurations is None:
                     source_configurations = pipeline.configurations(scopes['all'][0])
@@ -409,7 +455,7 @@ class Manager:
         for key, (nodes, validation) in scopes.items():
             digest = hashlib.sha256(json.dumps([health.get(identity) for identity in
                 sorted({node.identity for node in nodes} | {node.source_entry.identity for node in nodes
-                                                           if node.source_entry is not None})], sort_keys=True).encode()).hexdigest()
+                                                           if node.source_entry is not None and not node.pinned})], sort_keys=True).encode()).hexdigest()
             signature = (id(nodes), max_age, digest)
             saved = self.snapshot if key == 'all' else self.snapshot.get('publications', {}).get(key, {})
             if (self.publication_keys.get(key) == signature
@@ -625,10 +671,14 @@ class Manager:
             # or pending custom endpoints must never hold up a provider draw.
             all_required = {p['id']: pipeline.configurations(by_source[p['name']])
                         for p in config['providers'] if p['enabled']}
-            required = {identifier: pipeline.configurations(e for e in by_source[p['name']] if e.source_entry is None)
+            required = {identifier: pipeline.configurations(e for e in by_source[p['name']]
+                                                            if e.source_entry is None and not e.pinned)
                         for p in config['providers'] if p['enabled'] for identifier in [p['id']]}
             allowed = set().union(*(keys for identifier, keys in all_required.items()
                                   if captured is None or captured.get(identifier) == versions.get(identifier)))
+            # A provider redraw does not supersede an unchanged saved server.
+            # Rebuilding current scopes still rejects deleted/edited variants.
+            allowed.update(pipeline.configurations(e for e in candidate_entries if e.pinned))
             if incoming is not None:
                 results = pipeline.merge_results(results, incoming, allowed)
             coverage = {}
@@ -739,8 +789,8 @@ class Manager:
             regular = job.get('regular', False)
             reuse = ((connectivity.BATCH_REUSE_SECONDS if regular else config['check_seconds'])
                      if job.get('reuse_recent') else 0)
-            originals = [entry for entry in entries if entry.source_entry is None]
-            variants = [entry for entry in entries if entry.source_entry is not None]
+            originals = [entry for entry in entries if entry.source_entry is None or entry.pinned]
+            variants = [entry for entry in entries if entry.source_entry is not None and not entry.pinned]
             deadline = time.monotonic() + env_int('PARSER_CHECK_BATCH_SECONDS', connectivity.BATCH_TIMEOUT, 1, 300)
             results = self.checker(originals, self.store.root, stop=self.stop, previous=previous,
                                    progress=progress, targets=targets, reuse_seconds=reuse, deadline=deadline)
@@ -1006,13 +1056,17 @@ class Manager:
             records = []
             for record in policy['records']:
                 entry = matches.get((record['provider_id'], record['source_identity']))
-                source = server_policy.describe(entry) if entry else record['source']
-                effective = server_policy.customize(entry, record) if entry else None
+                provider = providers.get(record['provider_id'])
+                enabled = (provider is not None and provider['enabled'] and
+                           (subscription['all_providers'] or provider['id'] in subscription['provider_ids']))
+                saved = server_policy.restore(record, provider['name'] if provider else record['provider_name'], entry)
+                source = server_policy.describe(saved) if saved else record['source']
+                effective = server_policy.customize(saved, record) if saved and enabled else None
+                if effective is not None:
+                    effective.pinned = True
                 published = effective_inventory.get(effective.identity[:16]) if effective else None
                 checks = published.get('connectivity', {}) if published else health(effective) if effective else {}
-                provider = providers.get(record['provider_id'])
-                source_working = working(entry) if entry else False
-                status = ('unavailable' if entry is None else 'source_failed' if not source_working else
+                status = ('unavailable' if effective is None else
                           'working' if any(v['status'] == 'passed' for v in checks.values()) else 'pending_or_failed')
                 suggestions = []
                 if entry is None:
@@ -1021,7 +1075,8 @@ class Manager:
                         and candidate['source']['protocol'] == source['protocol']
                         and (candidate['source']['address'] == source['address']
                              or candidate['source']['name'] == source['name'])][:3]
-                records.append({**record, 'source': source, 'source_present': entry is not None,
+                records.append({**{key: value for key, value in record.items() if key != '_snapshot'},
+                    'source': source, 'source_present': entry is not None, 'saved_configuration': '_snapshot' in record,
                     'provider_name': provider['name'] if provider else record['provider_name'],
                     'status': status, 'checks': checks, 'suggestions': suggestions})
             query = query.strip().casefold()
@@ -1068,12 +1123,18 @@ class Manager:
                             for core in connectivity.CORES):
                         raise common.SubscriptionError('selected server is no longer working in this provider selection; reload servers')
                 edits = server_policy.overrides(value)
-                if entry and not server_policy.customize(entry, edits).outputs:
+                provider_name = providers[key[0]]['name'] if key[0] in providers else before['provider_name']
+                saved = server_policy.restore(before, provider_name, entry) if before and not relink else entry
+                if saved and not server_policy.customize(saved, edits).outputs:
                     raise common.SubscriptionError('this server does not support address or port customization')
+                snapshot = (before.get('_snapshot') if before and not relink else None)
+                if snapshot is None and saved is not None:
+                    snapshot = server_policy.freeze(saved)
                 records.append({'id': record_id or secrets.token_hex(8), 'provider_id': key[0],
-                    'provider_name': providers[key[0]]['name'] if key[0] in providers else before['provider_name'],
-                    'source_identity': key[1], 'source': server_policy.describe(entry) if entry else before['source'],
-                    'selected': value.get('selected', True), **edits})
+                    'provider_name': provider_name,
+                    'source_identity': key[1], 'source': server_policy.describe(saved) if saved else before['source'],
+                    'selected': value.get('selected', True), **edits,
+                    **({'_snapshot': snapshot} if snapshot is not None else {})})
             revision = self.store.save_server_policy(identifier, values['revision'], values['all_servers'], records)
             self.state_revision = secrets.token_hex(8)
             # A durable intent survives a restart between saving and rebuilding.

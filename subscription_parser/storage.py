@@ -405,6 +405,26 @@ class Store:
                 (identifier, revision + 1, int(all_servers), common.json_text(records)))
         return revision + 1
 
+    def remember_server_sources(self, snapshots):
+        """Fill legacy bindings transactionally without replacing newer edits."""
+        changed = 0
+        if not snapshots:
+            return changed
+        with self.connection(write=True) as connection:
+            for policy in connection.execute('SELECT * FROM subscription_server_policies').fetchall():
+                records = json.loads(policy['records'])
+                additions = 0
+                for record in records:
+                    snapshot = snapshots.get((record['provider_id'], record['source_identity']))
+                    if '_snapshot' not in record and snapshot is not None:
+                        record['_snapshot'] = snapshot
+                        additions += 1
+                if additions:
+                    connection.execute('UPDATE subscription_server_policies SET records = ?, revision = revision + 1 '
+                        'WHERE subscription_id = ?', (common.json_text(records), policy['subscription_id']))
+                    changed += additions
+        return changed
+
     def save_subscription(self, values, identifier=None):
         name = values['name'].strip()
         if not name or len(name) > 80 or any(ord(char) < 32 for char in name):

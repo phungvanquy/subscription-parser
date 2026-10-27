@@ -8,6 +8,7 @@ import json
 from . import common, protocols
 
 MAX_RECORDS = 1000
+MAX_SNAPSHOT_BYTES = 262144
 
 
 def source_key(entry):
@@ -125,16 +126,77 @@ def customize(entry, values):
     return edited
 
 
-def apply(by_provider, provider_ids, policy):
+def freeze(entry):
+    """Save the source and its dependency closure, without unrelated servers."""
+    target = {'singbox': 'hiddify', 'mihomo': 'mihomo', 'xray': 'xray'}.get(entry.kind)
+    context = []
+    if target and protocols.dependencies(entry.original, target):
+        key = 'name' if target == 'mihomo' else 'tag'
+        lookup = {node.get(key): node for node in entry.context}
+        visited = set()
+        def collect(node, depth=0):
+            if depth > 20:
+                raise common.SubscriptionError('saved server dependency chain is too deep')
+            for reference in protocols.dependencies(node, target):
+                if reference in visited:
+                    continue
+                if reference not in lookup:
+                    raise common.SubscriptionError('saved server has an unavailable dependency')
+                visited.add(reference)
+                context.append(copy.deepcopy(lookup[reference]))
+                collect(lookup[reference], depth + 1)
+        collect(entry.original)
+    snapshot = {'version': 1, 'kind': entry.kind, 'name': entry.name, 'original': copy.deepcopy(entry.original),
+                'context': context, 'group_size': entry.group_size, 'identity': entry.identity}
+    if len(json.dumps(snapshot, ensure_ascii=False).encode()) > MAX_SNAPSHOT_BYTES:
+        raise common.SubscriptionError('saved server configuration exceeds the 256 KiB limit')
+    return snapshot
+
+
+def restore(record, provider_name, current=None):
+    """Reapply current adapters to a saved source, preserving its stable binding."""
+    snapshot = record.get('_snapshot')
+    if snapshot is None:
+        return current
+    try:
+        if (snapshot['version'] != 1 or snapshot['kind'] not in {'uri', 'singbox', 'mihomo', 'xray'}
+                or len(json.dumps(snapshot, ensure_ascii=False).encode()) > MAX_SNAPSHOT_BYTES):
+            return None
+        entry = protocols.adapt(snapshot['kind'], snapshot['original'], provider_name,
+                                snapshot['name'], snapshot['context'], snapshot['group_size'])
+        entry.identity = snapshot['identity']
+        if source_key(entry) != record['source_identity']:
+            return None
+        if current is not None:
+            entry.name = current.name
+        return entry
+    except (common.SubscriptionError, KeyError, TypeError, ValueError, AttributeError, IndexError):
+        return None
+
+
+def apply(by_provider, provider_ids, policy, provider_names=None):
     bindings = {(r['provider_id'], r['source_identity']): r for r in policy.get('records', [])}
-    named, nodes = [], []
+    named, saved, nodes, matches = [], [], [], {}
     for provider_id in provider_ids:
         for entry in by_provider.get(provider_id, []):
-            record = bindings.get((provider_id, source_key(entry))) if bindings else None
-            if not policy.get('all_servers', True) and (not record or not record['selected']):
+            key = (provider_id, source_key(entry)) if bindings else None
+            if key in bindings:
+                if key not in matches or entry.group_size < matches[key].group_size:
+                    matches[key] = entry
                 continue
-            (named if record and record.get('name') else nodes).append(
-                customize(entry, record or {}))
+            if policy.get('all_servers', True):
+                nodes.append(customize(entry, {}))
+    for key, record in bindings.items():
+        if key[0] not in provider_ids or (not policy.get('all_servers', True) and not record['selected']):
+            continue
+        current = matches.get(key)
+        provider_name = (provider_names or {}).get(key[0],
+            current.source if current is not None else record.get('provider_name', 'Provider'))
+        entry = restore(record, provider_name, current)
+        if entry is not None:
+            edited = customize(entry, record)
+            edited.pinned = True
+            (named if record.get('name') else saved).append(edited)
     # Prefer an explicitly named copy when duplicate sources describe the same
     # configuration. Endpoint variants have different identities and both survive.
-    return named + nodes
+    return named + saved + nodes

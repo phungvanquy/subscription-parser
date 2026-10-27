@@ -260,9 +260,11 @@ subscription rebuilds publications from cached responses without fetching provid
   Each has a persistent local `id`, `provider_id`, `provider_name`, full
   `source_identity`, `source` summary (name, protocol, address, port), `selected`,
   and nullable `address`, `port`, and `name` overrides.
-- Each saved record also includes `source_present`, `checks`, `suggestions`, and
-  `status`: `working`, `unavailable`, `source_failed`, or `pending_or_failed`.
+- Each saved record also includes `source_present`, `saved_configuration`, `checks`,
+  `suggestions`, and `status`: `working`, `unavailable`, or `pending_or_failed`.
   Status describes connection availability, independently of `selected`.
+  A saved configuration can be working when `source_present` is false. Credentials
+  and the saved configuration payload are not returned by this editor endpoint.
 - `available`, `available_total`, `offset`, and `limit`: currently working source
   candidates not already bound in this policy. Candidates use provider IDs and
   full original configuration hashes, not the library's shortened server IDs.
@@ -288,7 +290,7 @@ The response is `{"revision": 1}`. For existing records, send their local `id`.
 Omitted records are forgotten. A deselected record retains its edits; selection
 flags are consulted only when `all_servers` is false. `all_servers: false` with
 an empty list publishes nothing. Overrides omitted or set to null/blank inherit
-source values; a port must be an integer from 1 to 65535 or null. Names accept
+saved source values; a port must be an integer from 1 to 65535 or null. Names accept
 up to 200 characters without controls; addresses accept a hostname or IP, not a
 URL. Unknown fields are rejected.
 
@@ -302,8 +304,11 @@ currently selected, enabled providers and their published samples.
 Saving during a running job or with an outdated revision returns 409. Policy
 updates are atomic, preserve subscription tokens, use cached providers, and
 queue checks durably. A configuration change cannot use a previous variant's
-passing result. Provider sampling and original-source health remain prerequisites
-for publication; modified settings additionally require their own passing checks.
+passing result. Saved configurations remain eligible outside future provider
+samples and need their own current passing client checks. Original-source health
+does not block them. Paused/removed providers and subscription deselection still
+exclude them. Exact legacy configurations are recovered from full cached responses
+when available; this internal upgrade advances the affected policy revision.
 Subscription summaries include `server_policy.revision` and
 `server_policy.all_servers`; full records are returned only by this endpoint.
 

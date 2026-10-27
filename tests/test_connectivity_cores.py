@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.connectivity_fixture import fixture
-from subscription_parser import connectivity as c, protocols, server_policy
+from subscription_parser import connectivity as c, protocols, server_policy, v2board
 
 CORES = Path(os.environ.get('PARSER_TOOLS_DIR', '/opt/client-cores'))
 
@@ -82,6 +82,24 @@ class RealCoreTests(unittest.TestCase):
                 value = self.probe(self.node(**credential), core)
                 self.assertEqual(value['status'], 'failed', value)
         self.assertEqual(self.local['server'].requests, 0)
+
+    def test_custom_uri_export_tunnels_through_the_overridden_endpoint(self):
+        with socket.socket() as closed:
+            closed.bind(('127.0.0.1', 0))
+            original = self.node(server_port=closed.getsockname()[1])
+            source_uri = v2board.entry_link(original, 'Source')
+            source = protocols.parse(source_uri.encode(), 'Local')[0]
+            modified = server_policy.customize(source, {'address': 'localhost',
+                'port': self.local['node']['server_port'], 'name': 'Customized'})
+            exported = v2board.export([modified])
+            self.assertEqual(exported['count'], 1, exported['diagnostics'])
+            imported = protocols.parse(exported['body'].encode(), 'Client')[0]
+            for core in c.CORES:
+                with self.subTest(core=core):
+                    value = self.probe(imported, core)
+                    self.assertEqual(value['status'], 'passed', value)
+        self.assertEqual(self.local['server'].requests, len(c.CORES))
+        self.assertFalse(list((self.root / '.parser-state').iterdir()))
 
     def test_tls_errors_and_wrong_http_status_are_not_success(self):
         for core in c.CORES:

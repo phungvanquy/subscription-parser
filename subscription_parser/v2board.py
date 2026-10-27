@@ -8,7 +8,7 @@ import json
 import re
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit, urlunsplit
 
-from . import common, hysteria, protocols
+from . import common, hysteria, protocols, server_policy
 from .xray_transports import vless_link
 
 MAX_NODES = 500
@@ -173,15 +173,49 @@ def hysteria_link(entry, label):
     return hysteria.mihomo_link(node, label)
 
 
+def customized_uri(entry, uri):
+    """Overlay the checked endpoint on a normalized, lossless source URI.
+
+    Keep original URI-only options and source validation intact. Native outputs
+    carry address/port overrides; the immutable source does not.
+    """
+    if entry.source_entry is None:
+        return uri
+    target = next(target for target in protocols.TARGETS if target in entry.outputs)
+    node, address_key, port_key = server_policy.endpoint(entry.outputs[target], target)
+    host, port = node[address_key], node.get(port_key)
+    if uri.startswith('vmess://'):
+        data = json.loads(protocols.b64(uri[8:]))
+        host, port = endpoint(host, port)
+        data.update(add=host.strip('[]'), port=port)
+        return 'vmess://' + base64.b64encode(json.dumps(data, ensure_ascii=False, separators=(',', ':')).encode()).decode()
+    parsed = urlsplit(uri)
+    if parsed.scheme in hysteria.SCHEMES:
+        _, _, source_port, ranges, _, params = hysteria.parse_uri(uri)
+        hopping = node.get('server_ports') or node.get('ports')
+        host, port = endpoint(host, source_port if hopping else port)
+        if not hopping:
+            # An explicit single port replaces both forms of port hopping,
+            # even when it equals the first port in the original range.
+            ranges = [str(port)]
+            params.pop('mport', None)
+        port = ','.join(ranges)
+        parsed = parsed._replace(query=urlencode(params, quote_via=quote))
+    else:
+        host, port = endpoint(host, port)
+    userinfo, separator, _ = parsed.netloc.rpartition('@')
+    return urlunsplit(parsed._replace(netloc=f'{userinfo}{separator}{host}:{port}'))
+
+
 def entry_link(entry, label):
     if entry.protocol not in SUPPORTED:
         raise Error(UNSUPPORTED)
     if not entry.outputs:
         raise Error('no client accepted this configuration')
     if entry.kind == 'uri':
-        return normalize_uri(entry.original, label)
+        return customized_uri(entry, normalize_uri(entry.original, label))
     if entry.protocol in hysteria.SCHEMES:
-        return normalize_uri(hysteria_link(entry, label), label)
+        return customized_uri(entry, normalize_uri(hysteria_link(entry, label), label))
     node = entry.outputs.get('xray')
     if node is None and 'hiddify' in entry.outputs:
         node = protocols.native_to_xray(entry.outputs['hiddify'])

@@ -87,11 +87,15 @@ rows, probe/feed limits, saved draws across rechecks and restarts, new draws on
 successful fetches, preview reuse, per-subscription scope isolation, native
 dependencies, and transactional upgrades from schema 6.
 Subscription-policy regressions cover schema-8 rollback, preserved tokens, exact
-source matching, rename/restart recovery, missing sampled servers, explicit
-relinking, per-client source and variant health, cross-subscription isolation,
-shared variant checks, source expiry, stale revisions, and late worker results.
+source matching, saved configuration recovery outside random samples, explicit
+relinking, independent saved-server health, cross-subscription isolation, private
+credentials, shared checks, expiry, stale revisions, and late worker results.
 Real-core fixtures also verify address and port overrides with VLESS, VMess,
-Shadowsocks, and Trojan.
+Shadowsocks, and Trojan, including reimported V2Board URI exports. URI regressions
+cover encoded VMess and Shadowsocks credentials, IPv6, preserved transport/TLS
+options, both Hysteria versions and hopping-port overrides. The URI feed and the
+optional URI in V2Board JSON must match the checked custom endpoint. Export
+upgrades rebuild saved feeds while retaining selections, bindings, and valid checks.
 Mihomo compatibility tests tunnel verified HTTPS through local XHTTP fixtures in
 packet-up, stream-up, and stream-one modes with all three cores. REALITY tests
 verify the opt-in Chrome/MLKEM configuration and reject a wrong public key.
@@ -116,34 +120,42 @@ The implementation preserves these boundaries:
    policy per subscription: all-working or selected-only mode, and at most 1000
    saved records. Each record has a local ID, provider ID, full original source
    identity, a source summary, a selection flag, and optional address/port/name
-   overrides. Policy replacements are transactional; stale revisions fail.
+   overrides. Each saved source includes a private versioned snapshot of its
+   original configuration and dependency closure, bounded to 256 KiB. Policy
+   replacements are transactional; stale revisions fail.
    Deleting the subscription cascades to its policy. Removing a provider does
    not erase saved records. The v8 migration defaults to existing behavior.
 2. **Source identity.** Bindings use provider ID plus a hash of the original
    native settings and dependency identity. This is stricter than the portable
    deduplication ID and captures native extras such as Xray mux settings. Own
    display names, URI fragments, and encoded VMess `ps` labels are excluded. Modified upstream
-   configurations are not heuristically substituted: the editor offers explicit
-   relinking, retaining the local record ID and chosen overrides. Credentials or
+   configurations are not heuristically substituted: working snapshots remain
+   available and the editor offers explicit relinking, retaining the local record
+   ID and chosen overrides. Credentials or
    coincident names are not treated as upstream node IDs.
-3. **Configuration building.** `server_policy.py` copies each native output and
-   edits its endpoint, preserving native extras and dependency bundles. It keeps
+3. **Configuration building.** `server_policy.py` reapplies current adapters to the
+   saved source, copies each native output and edits its endpoint, preserving
+   native extras and dependency bundles. It keeps
    immutable source context shared to avoid quadratic copying. Unmodified and
    name-only entries retain existing check identities; endpoint variants receive
    an identity derived from the original identity and effective configurations.
-4. **Checks and publication.** Provider sampling and original validation run
-   first. Customized scopes retain only selected source entries. Original checks
-   run before variant checks; a variant is probed only for cores whose original
-   source passed. Publication requires both checks and expires at the earlier
-   deadline. Source validation rejection also blocks that client. Provider-draw
-   promotion depends on original configurations, so failed variants cannot stall
-   refreshes. Existing generation guards reject late worker results.
+4. **Checks and publication.** Ordinary providers keep their random samples.
+   Customized scopes add eligible saved configurations independently of that
+   sample. Saved entries undergo native validation and their own per-client
+   connection checks, even if the source disappears or fails. Their results have
+   the normal expiry deadline. Provider-draw promotion depends only on sampled
+   configurations, so saved entries cannot stall refreshes. Exact-configuration
+   guards reject late results for edited/forgotten entries while retaining valid
+   results for saved configurations unaffected by a redraw. Provider disablement
+   and subscription/provider deselection still prevent publication.
 5. **Isolation and recovery.** Custom scope keys include subscription ID, provider
    selection, and policy revision. A failed rebuild cannot serve an old policy's
    outputs. Policy saves queue a durable check intent and do not fetch providers.
-   Expiry rebuilds restore variants from pinned source selections after restart.
+   Expiry rebuilds restore saved configurations from SQLite after restart. Legacy
+   bindings recover exact sources from full cached responses, including entries
+   outside the current sample; recovery never replaces an existing snapshot.
    Identical variants of the same source reuse checks across subscriptions. Both
-   checking stages share one batch deadline. Startup recovers a policy committed
+   ordinary and saved checks share one batch deadline. Startup recovers a policy committed
    just before its check intent or publication could be saved.
 6. **Editor and API.** The authenticated server-policy endpoint returns all saved
    entries and paginated working candidates. The browser renders 25 compact saved

@@ -13,6 +13,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+from urllib.parse import urlsplit
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -70,8 +71,7 @@ def main():
         raise RuntimeError('synthetic cached provider did not refresh')
 
     provider_url = 'https://provider.invalid/docker-smoke'
-    body = json.dumps({'outbounds': [{'type': 'vless', 'tag': 'Synthetic', 'server': '127.0.0.1',
-        'server_port': 20901, 'uuid': UUID}]}).encode()
+    body = f'vless://{UUID}@127.0.0.1:20901?type=tcp#Synthetic'.encode()
     files = {
         '.env': f'DEVICE_ID=docker-authorized-id\nPARSER_ADMIN_TOKEN={admin}\nPARSER_SUBSCRIPTION_TOKEN={subscription}\nPARSER_PUBLIC_URL={base}\n',
         '.parser-state/providers.json': json.dumps({'refresh_seconds': 3600, 'providers': [{
@@ -139,7 +139,37 @@ def main():
             assert 'My Docker server' in customized['tag']
         with urllib.request.urlopen(state['links']['hiddify.json'], timeout=10) as response:
             assert json.load(response)['outbounds'][0]['server'] == '127.0.0.1'
+        with urllib.request.urlopen(scoped_link, timeout=10) as response:
+            customized_uri = response.read().decode().strip()
+            parsed = urlsplit(customized_uri)
+            assert (parsed.hostname, parsed.port) == ('localhost', 20901)
+        with urllib.request.urlopen(scoped['links']['v2board.json'], timeout=10) as response:
+            assert json.load(response)['nodes'][0]['uri'] == customized_uri
         checks.append('subscription endpoint overrides pass real core checks while the original feed stays unchanged')
+        compose('exec', '-T', 'app', 'python', '-c', '''
+import base64, json
+from pathlib import Path
+from subscription_parser import common
+path = Path('/data/.parser-state/cache/synthetic.json')
+cached = json.loads(path.read_text())
+body = base64.b64decode(cached['body']).decode().replace('@127.0.0.1:', '@localhost:')
+cached['body'] = base64.b64encode(body.encode()).decode()
+common.atomic_write(path, common.json_text(cached))
+''')
+        api('/api/check-servers', 'POST')
+        deadline = time.monotonic() + 70
+        while time.monotonic() < deadline:
+            state, saved_policy = api('/api/state'), api(policy_path)
+            record = saved_policy['records'][0]
+            if not state['busy'] and not state['check_queued'] and not record['source_present'] and record['status'] == 'working':
+                break
+            time.sleep(.5)
+        else:
+            raise RuntimeError('saved configuration did not survive provider replacement')
+        assert record['saved_configuration'] and '_snapshot' not in record and UUID not in json.dumps(saved_policy)
+        with urllib.request.urlopen(scoped_link, timeout=10) as response:
+            assert response.read().decode().strip() == customized_uri
+        checks.append('saved custom configuration remains working after its source leaves the provider response')
         setup = api('/api/security/2fa/setup', 'POST', {'token': admin})
         code = compose('exec', '-T', 'app', 'python', '-c',
                        'import pyotp, sys; print(pyotp.TOTP(sys.stdin.read()).now())', data=setup['secret'].encode()).decode().strip()
@@ -162,10 +192,13 @@ def main():
         restored_scope = next(item for item in state['subscriptions'] if item['id'] == scoped_id)
         assert restored_scope['provider_ids'] == ['synthetic'] and restored_scope['links'] == scoped['links']
         with urllib.request.urlopen(scoped_link, timeout=10) as response:
-            assert response.status == 200 and UUID.encode() in response.read()
+            assert response.status == 200 and response.read().decode().strip() == customized_uri
+        with urllib.request.urlopen(scoped['links']['v2board.json'], timeout=10) as response:
+            assert json.load(response)['nodes'][0]['uri'] == customized_uri
         checks.append('named subscription selections, independent tokens and passing feeds survive container replacement')
         restored_policy = api(policy_path)
         assert restored_policy['revision'] == saved_policy['revision'] and not restored_policy['all_servers']
+        assert restored_policy['records'][0]['saved_configuration'] and not restored_policy['records'][0]['source_present']
         for field in ('id', 'provider_id', 'source_identity', 'selected', 'address', 'port', 'name'):
             assert restored_policy['records'][0][field] == saved_policy['records'][0][field], field
         with urllib.request.urlopen(scoped['links']['hiddify.json'], timeout=10) as response:

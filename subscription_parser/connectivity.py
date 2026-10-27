@@ -70,7 +70,7 @@ def current_result(entry, target, results, max_age, now=None):
     if target not in entry.outputs:
         return result('unsupported', 'No compatible configuration for this core')
     source = None
-    if entry.source_entry is not None:
+    if entry.source_entry is not None and not entry.pinned:
         source = current_result(entry.source_entry, target, results, max_age, now)
         if source['status'] != 'passed':
             return {**source, 'reason': 'Source server has no current passing check for this client'}

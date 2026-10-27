@@ -165,7 +165,7 @@ def check_subscription_server_policy(page, manager, checks):
         page.locator('#customize-subscription').click()
         expect(page.locator('.policy-record')).to_have_count(1)
         page.locator('.policy-record [data-edit]').click()
-        expect(editor).to_contain_text('Provider: example.org')
+        expect(editor).to_contain_text('Saved source: example.org')
         page.locator('[data-reset=address]').click()
         expect(page.locator('[data-field=address]')).to_have_value('')
         page.keyboard.press('Escape')
@@ -184,11 +184,13 @@ def check_subscription_server_policy(page, manager, checks):
         manager.refresh()
         page.evaluate('loadState()')
         page.locator('#customize-subscription').click()
-        expect(page.locator('.policy-record .status-pill')).to_have_text('Source unavailable')
+        expect(page.locator('.policy-record .status-pill')).to_have_text('Working')
         page.locator('.policy-record [data-edit]').click()
+        expect(editor).to_contain_text('remains available while its checks pass')
+        assert page.request.get(url).status == 200
         expect(page.locator('[data-field=address]')).to_have_value('relay.example.org')
         page.locator('.policy-suggestion').first.click()
-        expect(editor).to_contain_text('Provider: 444')
+        expect(editor).to_contain_text('Saved source: 444')
         page.locator('#policy-save').click()
         expect(page.locator('#policy-dialog')).not_to_be_visible()
         manager.begin_check(reuse_recent=True); manager.wait_for_idle(15)
@@ -203,7 +205,7 @@ def check_subscription_server_policy(page, manager, checks):
         expect(page.locator('#policy-dialog')).not_to_be_visible()
         assert page.request.get(url).status == 503
         assert manager.store.server_policy(identifier)['records'][0]['address'] == 'relay.example.org'
-        checks.append('custom endpoints publish only after checks; changed sources require relinking and retain edits when deselected')
+        checks.append('working saved servers survive provider changes; explicit relinking updates sources and deselection retains edits')
     finally:
         manager.fetcher = original_fetcher
         if page.locator('#policy-dialog').is_visible():

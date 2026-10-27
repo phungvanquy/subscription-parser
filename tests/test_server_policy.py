@@ -9,10 +9,11 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
 
-from subscription_parser import common, connectivity, protocols, server_policy, service
+from subscription_parser import common, connectivity, protocols, server_policy, service, v2board
 from subscription_parser.app import create_app
 from subscription_parser.storage import Store, SCHEMA_VERSION
 
@@ -108,8 +109,82 @@ class ServerPolicyTests(unittest.TestCase):
         for filename in ('mihomo.yaml', 'xray.json', 'v2board.json', 'v2board.txt', 'combined.json'):
             response = self.feed(file=filename)
             self.assertEqual(response.status_code, 200, filename)
+        self.assert_v2board_endpoint('custom.example', 8443)
         self.assertEqual(self.fetches, [])
         self.assertEqual(self.manager.snapshot['exports'], original)
+
+    def assert_v2board_endpoint(self, address, port):
+        uri = self.feed(file='v2board.txt').text.strip()
+        native = self.feed(file='v2board.json').json()['nodes']
+        self.assertEqual(len(native), 1)
+        self.assertEqual((native[0]['server'], native[0]['port']), (address, port))
+        self.assertEqual(native[0]['uri'], uri)
+        parsed = urlsplit(uri)
+        self.assertEqual((parsed.hostname, parsed.port), (address, port))
+
+    def test_uri_source_override_publishes_matching_uri_in_both_v2board_formats(self):
+        uri = f'vless://{UUID}@japan.example:443?type=tcp&security=tls&sni=tls.example#Japan'
+        with patch.object(self.manager, 'fetcher', return_value=(uri.encode(), {'fetched_at': common.now()})):
+            self.manager.refresh()
+        original = copy.deepcopy(self.manager.snapshot['exports'])
+        self.save([self.record(address='custom.example', port=8443, name='My Japan')])
+        for filename in ('v2board.txt', 'v2board.json'):
+            self.assertEqual(self.feed(file=filename).status_code, 503)
+        self.check()
+        self.assert_v2board_endpoint('custom.example', 8443)
+        self.assertEqual(self.manager.snapshot['exports'], original)
+        # A failed custom endpoint cannot fall back to the original URI.
+        self.failed = {('custom.example', core) for core in connectivity.CORES}
+        self.check(reuse=False)
+        for filename in ('v2board.txt', 'v2board.json'):
+            self.assertEqual(self.feed(file=filename).status_code, 503)
+
+    def test_hysteria_source_override_publishes_matching_uri_in_both_v2board_formats(self):
+        self.document = [{'type': 'hysteria2', 'tag': 'Japan', 'server': 'japan.example', 'server_port': 443,
+                          'password': 'synthetic-password', 'tls': {'enabled': True, 'server_name': 'tls.example'}}]
+        self.manager.refresh()
+        self.save([self.record(address='custom.example', port=8443)])
+        self.check()
+        self.assert_v2board_endpoint('custom.example', 8443)
+
+    def test_export_upgrade_rebuilds_saved_custom_uris_and_reuses_checks(self):
+        self.document = [{'type': 'hysteria2', 'tag': 'Japan', 'server': 'japan.example', 'server_port': 443,
+                          'password': 'synthetic-password', 'tls': {'enabled': True, 'server_name': 'tls.example'}}]
+        self.manager.adapter_policy = protocols.adapter_policy() | {'version': 3}
+        with patch.object(v2board, 'customized_uri', side_effect=lambda entry, uri: uri):
+            self.manager.refresh()
+            self.save([self.record(address='custom.example', port=8443)])
+            self.check()
+        before = copy.deepcopy(self.manager.snapshot)
+        key = service.publication.scope_key(self.manager.store.subscription(self.subscription))
+        old_exports = before['publications'][key]['exports']
+        self.assertEqual(urlsplit(old_exports['v2board.txt'].strip()).hostname, 'japan.example')
+        saved_policy = self.manager.store.server_policy(self.subscription)
+        self.fetches.clear(); self.probes.clear()
+        upgraded = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
+        self.assertEqual(set(upgraded.jobs.items), {'check'})
+        upgraded.refresh(download=False, check=True, reuse_recent=True)
+        self.assertNotIn('last_error', upgraded.snapshot)
+        self.assertEqual(upgraded.snapshot['adapter_policy'], protocols.adapter_policy())
+        self.assertEqual(upgraded.snapshot['active_selections'], before['active_selections'])
+        self.assertEqual(upgraded.snapshot['connectivity'], before['connectivity'])
+        self.assertEqual(upgraded.store.server_policy(self.subscription), saved_policy)
+        self.assertEqual((self.fetches, self.probes), ([], []))
+        exports = upgraded.snapshot['publications'][key]['exports']
+        for filename in ('hiddify.json', 'mihomo.yaml', 'xray.json', 'combined.json'):
+            if filename == 'combined.json':
+                # Publication timestamps change; the configurations do not.
+                before_archive, after_archive = map(json.loads, (old_exports[filename], exports[filename]))
+                before_archive.pop('generated_at'); after_archive.pop('generated_at')
+                self.assertEqual(after_archive, before_archive)
+            else:
+                self.assertEqual(exports[filename], old_exports[filename])
+        uri = exports['v2board.txt'].strip()
+        parsed = urlsplit(uri)
+        self.assertEqual((parsed.hostname, parsed.port), ('custom.example', 8443))
+        self.assertEqual(json.loads(exports['v2board.json'])['nodes'][0]['uri'], uri)
+        restarted = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
+        self.assertFalse(restarted.jobs.items)
 
     def test_name_only_and_same_endpoint_reuse_source_checks(self):
         self.save([self.record(name='My Japan', address='japan.example', port=443)])
@@ -144,31 +219,33 @@ class ServerPolicyTests(unittest.TestCase):
         self.assertEqual(self.manager.snapshot.get('selection_checks'), {})
         self.assertEqual(self.policy()['records'][0]['status'], 'pending_or_failed')
 
-    def test_source_failure_blocks_previously_passing_override_and_skips_its_probe(self):
+    def test_source_failure_does_not_block_a_working_saved_override(self):
         self.save([self.record(address='custom.example')]); self.check()
         self.failed = {('japan.example', core) for core in connectivity.CORES}
         self.probes.clear(); self.check(reuse=False)
-        self.assertEqual(self.feed().status_code, 503)
-        self.assertNotIn('custom.example', {row[2] for row in self.probes})
-        self.assertEqual(self.policy()['records'][0]['status'], 'source_failed')
-        self.failed.clear(); self.check(reuse=False)
         self.assertEqual(self.feed().status_code, 200)
+        self.assertIn('custom.example', {row[2] for row in self.probes})
+        self.assertEqual(self.policy()['records'][0]['status'], 'working')
+        self.failed |= {('custom.example', core) for core in connectivity.CORES}
+        self.check(reuse=False)
+        self.assertEqual(self.feed().status_code, 503)
+        self.assertEqual(self.policy()['records'][0]['status'], 'pending_or_failed')
 
-    def test_source_and_custom_health_are_required_for_each_core(self):
+    def test_saved_server_requires_its_own_passing_check_for_each_core(self):
         self.failed = {('japan.example', 'mihomo'), ('custom.example', 'xray')}
         self.check(reuse=False)
         self.probes.clear()
         self.save([self.record(address='custom.example')]); self.check()
         self.assertEqual(self.feed().status_code, 200)
-        self.assertEqual(self.feed(file='mihomo.yaml').status_code, 503)
+        self.assertEqual(self.feed(file='mihomo.yaml').status_code, 200)
         self.assertEqual(self.feed(file='xray.json').status_code, 503)
-        self.assertNotIn(('custom.example', 'mihomo'), {(p[2], p[1]) for p in self.probes})
+        self.assertIn(('custom.example', 'mihomo'), {(p[2], p[1]) for p in self.probes})
 
-    def test_rejected_source_format_cannot_be_enabled_by_an_override(self):
+    def test_saved_configuration_still_requires_native_validation(self):
         value = self.record(address='custom.example')
         def validate(nodes, root):
             for entry in nodes:
-                if entry.source_entry is None and entry.name == 'Japan':
+                if entry.pinned:
                     entry.outputs.pop('mihomo', None)
             return protocols.combine(nodes) | {'validation': {}}
         with patch.object(service, 'checked_combine', side_effect=validate):
@@ -178,7 +255,7 @@ class ServerPolicyTests(unittest.TestCase):
             scope = self.manager.published_scopes[service.publication.scope_key(self.manager.store.subscription(self.subscription))]
             self.assertEqual(connectivity.current_result(scope[0][0], 'mihomo', self.manager.snapshot['connectivity'], 1200)['status'], 'unsupported')
 
-    def test_custom_scope_revalidates_when_global_source_acceptance_changes(self):
+    def test_saved_scope_validates_independently_from_other_provider_configurations(self):
         self.client.put('/api/subscriptions/' + self.subscription, json={
             'name': 'Phone', 'all_providers': False, 'provider_ids': [self.provider['id']]})
         def validate(nodes, root):
@@ -191,9 +268,10 @@ class ServerPolicyTests(unittest.TestCase):
             self.assertEqual(self.feed(file='mihomo.yaml').status_code, 200)
             self.client.post('/api/providers', json={'name': 'Second', 'url': 'https://second.example/sub', 'hwid_id': None})
             self.manager.refresh()
-            self.assertEqual(self.feed(file='mihomo.yaml').status_code, 503)
+            self.assertEqual(self.feed(file='mihomo.yaml').status_code, 200)
             scope = self.manager.published_scopes[service.publication.scope_key(self.manager.store.subscription(self.subscription))]
-            self.assertNotIn('mihomo', scope[0][0].source_entry.outputs)
+            self.assertIn('mihomo', scope[0][0].outputs)
+            self.assertTrue(scope[0][0].pinned)
 
     def test_missing_server_keeps_binding_through_restart_and_source_rename(self):
         self.save([self.record(address='custom.example', name='My Japan')]); self.check()
@@ -202,10 +280,14 @@ class ServerPolicyTests(unittest.TestCase):
         self.manager.refresh()
         missing = self.policy()['records'][0]
         self.assertEqual(missing['id'], saved['id'])
-        self.assertEqual(missing['status'], 'unavailable')
-        self.assertEqual(self.feed().status_code, 503)
+        self.assertEqual(missing['status'], 'working')
+        self.assertFalse(missing['source_present'])
+        self.assertTrue(missing['saved_configuration'])
+        self.assertEqual(self.feed().status_code, 200)
         restarted = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
         self.assertEqual(restarted.store.server_policy(self.subscription)['records'][0]['address'], 'custom.example')
+        restarted.refresh(download=False, check=True, reuse_recent=False)
+        self.assertEqual(restarted.subscription_snapshot(restarted.store.subscription(self.subscription))['published_total'], 1)
         original['tag'] = 'Tokyo renamed'
         self.document.append(original)
         self.manager.refresh()
@@ -221,7 +303,9 @@ class ServerPolicyTests(unittest.TestCase):
         self.document[0]['uuid'] = '11234567-89ab-4cde-8fab-0123456789ab'
         self.manager.refresh()
         missing = self.policy()['records'][0]
-        self.assertEqual(missing['status'], 'unavailable')
+        self.assertEqual(missing['status'], 'working')
+        self.assertFalse(missing['source_present'])
+        self.assertEqual(self.feed().json()['outbounds'][0]['uuid'], UUID)
         suggestion = missing['suggestions'][0]
         self.assertNotEqual(suggestion['source_identity'], saved['source_identity'])
         updated = self.saved_payload(missing) | {'source_identity': suggestion['source_identity']}
@@ -232,7 +316,7 @@ class ServerPolicyTests(unittest.TestCase):
         self.assertEqual(returned['address'], 'custom.example')
         self.assertEqual(self.feed().json()['outbounds'][0]['uuid'], self.document[0]['uuid'])
 
-    def test_provider_sampling_stays_authoritative_without_pinning_saved_servers(self):
+    def test_saved_server_survives_sampling_without_expanding_the_provider_sample(self):
         self.save([self.record(name='Remember Japan')])
         identity = protocols.parse(json.dumps({'outbounds': [node()]}).encode(), 'Provider')[0].identity
         self.document = [node(f'Node {i}', f'node-{i}.example') for i in range(20)] + [node()]
@@ -242,8 +326,11 @@ class ServerPolicyTests(unittest.TestCase):
                           [value for value in values if value != identity][:size]):
             self.manager.refresh()
             self.assertEqual(self.manager.snapshot['total'], 1)
-        self.assertEqual(self.policy()['records'][0]['status'], 'unavailable')
-        self.assertEqual(self.feed().status_code, 503)
+        self.assertEqual(self.policy()['records'][0]['status'], 'working')
+        self.assertFalse(self.policy()['records'][0]['source_present'])
+        self.assertEqual(self.feed().status_code, 200)
+        self.assertEqual(len(self.feed('default').json()['outbounds']), 1)
+        self.assertEqual(self.feed().json()['outbounds'][0]['server'], 'japan.example')
         self.document = [node()]; self.manager.refresh()
         self.assertIn('Remember Japan', self.feed().json()['outbounds'][0]['tag'])
 
@@ -325,7 +412,7 @@ class ServerPolicyTests(unittest.TestCase):
         restarted.refresh(download=False, check=True, reuse_recent=True)
         self.assertEqual(restarted.subscription_snapshot(restarted.store.subscription(self.subscription))['published_total'], 1)
 
-    def test_original_and_variant_checks_share_one_batch_deadline(self):
+    def test_provider_and_saved_checks_share_one_bounded_batch(self):
         self.save([self.record(address='custom.example')])
         checker = self.manager.checker
         deadlines = []
@@ -334,10 +421,10 @@ class ServerPolicyTests(unittest.TestCase):
             return checker(*args, **kwargs)
         with patch.object(self.manager, 'checker', side_effect=observe):
             self.check()
-        self.assertEqual(len(deadlines), 2)
-        self.assertEqual(deadlines[0], deadlines[1])
+        self.assertEqual(len(deadlines), 1)
+        self.assertGreater(deadlines[0], time.monotonic())
 
-    def test_source_expiry_after_restart_excludes_a_fresh_custom_check(self):
+    def test_saved_check_survives_source_expiry_but_expires_on_its_own_deadline(self):
         self.save([self.record(address='custom.example')]); self.check()
         source_identity = protocols.parse(json.dumps({'outbounds': [node()]}).encode(), 'Provider')[0].identity
         old = time.time() - 2000
@@ -351,17 +438,29 @@ class ServerPolicyTests(unittest.TestCase):
         restarted = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
         restarted.ensure_publications()
         snapshot = restarted.subscription_snapshot(restarted.store.subscription(self.subscription))
-        self.assertEqual(snapshot['published_total'], 0)
+        self.assertEqual(snapshot['published_total'], 1)
         self.assertEqual(self.fetches, [])
+        for cores in restarted.snapshot['connectivity'].values():
+            for result in cores.values():
+                result['checked_ts'] = old
+        for snapshot in [restarted.snapshot, *restarted.snapshot['publications'].values()]:
+            snapshot['valid_until'] = old
+        restarted.ensure_publications()
+        snapshot = restarted.subscription_snapshot(restarted.store.subscription(self.subscription))
+        self.assertEqual(snapshot['published_total'], 0)
 
-    def test_late_variant_results_cannot_restore_a_disappeared_source(self):
+    def test_provider_redraw_accepts_unchanged_saved_results_but_forgetting_rejects_them(self):
         self.save([self.record(address='custom.example')]); self.check()
         old_results = copy.deepcopy(self.manager.snapshot['connectivity'])
         old_versions = dict(self.manager.snapshot['active_selections'])
         self.document.pop(0); self.manager.refresh()
         self.assertTrue(self.manager._publish(old_results, old_versions))
+        self.assertEqual(self.feed().status_code, 200)
+        self.assertEqual(self.policy()['records'][0]['status'], 'working')
+        self.save([])
+        self.assertTrue(self.manager._publish(old_results, old_versions))
         self.assertEqual(self.feed().status_code, 503)
-        self.assertEqual(self.policy()['records'][0]['status'], 'unavailable')
+        self.assertEqual(self.policy()['records'], [])
 
     def test_duplicate_sources_can_have_distinct_subscription_endpoints(self):
         self.client.post('/api/providers', json={'name': 'Second', 'url': 'https://second.example/sub', 'hwid_id': None})
@@ -381,6 +480,111 @@ class ServerPolicyTests(unittest.TestCase):
         self.save([self.record(address='custom.example')], all_servers=True); self.check()
         self.assertEqual({node['server'] for node in self.feed().json()['outbounds']}, {'custom.example', 'berlin.example'})
 
+    def test_missing_saved_server_keeps_all_exports_and_recovers_after_its_own_failure(self):
+        self.save([self.record(address='custom.example', port=8443, name='My Japan')]); self.check()
+        self.document.pop(0); self.manager.refresh()
+        files = ('hiddify.json', 'mihomo.yaml', 'xray.json', 'v2board.json', 'v2board.txt', 'combined.json')
+        for filename in files:
+            self.assertEqual(self.feed(file=filename).status_code, 200, filename)
+        self.assert_v2board_endpoint('custom.example', 8443)
+        self.failed = {('custom.example', core) for core in connectivity.CORES}
+        self.check(reuse=False)
+        for filename in files[:-1]:
+            self.assertEqual(self.feed(file=filename).status_code, 503, filename)
+        self.assertEqual(self.feed(file='combined.json').json()['servers'], [])
+        self.assertEqual(len(self.policy()['records']), 1)
+        self.failed.clear(); self.fetches.clear(); self.check(reuse=False)
+        self.assertEqual(self.fetches, [])
+        self.assert_v2board_endpoint('custom.example', 8443)
+        self.assertEqual(self.feed().json()['outbounds'][0]['uuid'], UUID)
+
+    def test_disabled_provider_and_deselection_stop_saved_publication(self):
+        self.save([self.record(address='custom.example')]); self.check()
+        self.document.pop(0); self.manager.refresh()
+        value = self.saved_payload(self.policy()['records'][0])
+        self.save([value | {'selected': False}])
+        self.assertEqual(self.feed().status_code, 503)
+        self.save([value]); self.check()
+        self.assertEqual(self.feed().status_code, 200)
+        response = self.client.put('/api/providers/' + self.provider['id'], json={'name': 'Provider', 'enabled': False})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(self.feed().status_code, 503)
+        self.assertEqual(self.policy()['records'][0]['status'], 'unavailable')
+        self.assertTrue(self.policy()['records'][0]['saved_configuration'])
+        response = self.client.put('/api/providers/' + self.provider['id'], json={'name': 'Provider', 'enabled': True})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.check()
+        self.assertEqual(self.feed().status_code, 200)
+        self.save([], all_servers=True); self.probes.clear(); self.check(reuse=False)
+        self.assertNotIn('custom.example', {row[2] for row in self.probes})
+        self.assertEqual(self.feed().json()['outbounds'][0]['server'], 'berlin.example')
+
+    def test_saved_credentials_stay_private_and_cannot_be_injected_through_policy_api(self):
+        self.save([self.record(address='custom.example')]); self.check()
+        private = self.manager.store.server_policy(self.subscription)['records'][0]
+        self.assertIn(UUID, json.dumps(private['_snapshot']))
+        public = self.policy()
+        self.assertNotIn(UUID, json.dumps(public))
+        self.assertNotIn('_snapshot', json.dumps(public))
+        self.save([self.saved_payload(public['records'][0]) | {'_snapshot': private['_snapshot']}], status=422)
+
+    def test_restart_recovers_legacy_configurations_outside_the_random_sample(self):
+        self.save([self.record(address='custom.example')]); self.check()
+        self.document += [node(f'Node {i}', f'node-{i}.example') for i in range(10)]
+        config = self.manager.store.config(); config['providers'][0]['server_limit'] = 1
+        self.manager.store.save_config(config)
+        source_id = protocols.parse(json.dumps({'outbounds': [node()]}).encode(), 'Provider')[0].identity
+        identities = sorted(entry.identity for entry in protocols.parse(json.dumps({'outbounds': self.document}).encode(), 'Provider'))
+        seed = next(str(index) for index in range(100) if service.random.Random(str(index)).sample(identities, 1) != [source_id])
+        original_token = service.secrets.token_hex
+        with patch.object(service.secrets, 'token_hex', side_effect=lambda size: seed if size == 16 else original_token(size)):
+            self.manager.refresh()
+        policy = self.manager.store.server_policy(self.subscription)
+        original = copy.deepcopy(policy['records'][0])
+        policy['records'][0].pop('_snapshot')
+        self.manager.store.save_server_policy(self.subscription, policy['revision'], False, policy['records'])
+        self.probes.clear(); self.fetches.clear()
+        restarted = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
+        restored = restarted.store.server_policy(self.subscription)['records'][0]
+        original['_snapshot']['group_size'] = len(self.document)
+        self.assertEqual(restored, original)
+        self.assertIn('check', restarted.jobs.items)
+        restarted.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual((self.probes, self.fetches), ([], []))
+        published = restarted.subscription_snapshot(restarted.store.subscription(self.subscription))
+        self.assertEqual(published['published_total'], 1)
+        again = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
+        self.assertEqual(again.store.server_policy(self.subscription), restarted.store.server_policy(self.subscription))
+        self.assertFalse(again.jobs.items)
+
+    def test_legacy_recovery_does_not_guess_changed_credentials(self):
+        self.save([self.record(address='custom.example')]); self.check()
+        self.document[0]['uuid'] = '11234567-89ab-4cde-8fab-0123456789ab'
+        self.manager.refresh()
+        policy = self.manager.store.server_policy(self.subscription)
+        policy['records'][0].pop('_snapshot')
+        self.manager.store.save_server_policy(self.subscription, policy['revision'], False, policy['records'])
+        restarted = service.Manager(self.root, self.manager.fetcher, self.manager.checker)
+        self.assertNotIn('_snapshot', restarted.store.server_policy(self.subscription)['records'][0])
+        restarted.refresh(download=False, check=True, reuse_recent=True)
+        self.assertEqual(restarted.subscription_servers(self.subscription)['records'][0]['status'], 'unavailable')
+        self.assertEqual(restarted.subscription_snapshot(restarted.store.subscription(self.subscription))['published_total'], 0)
+
+    def test_recovery_retry_keeps_newer_snapshots_and_preserves_binding_and_overrides(self):
+        self.save([self.record(address='custom.example')]); self.check()
+        policy = self.manager.store.server_policy(self.subscription)
+        original = copy.deepcopy(policy['records'][0])
+        policy['records'][0].pop('_snapshot')
+        self.manager.store.save_server_policy(self.subscription, policy['revision'], False, policy['records'])
+        with patch.object(self.manager.store, 'remember_server_sources', side_effect=OSError('synthetic write failure')):
+            with self.assertRaises(OSError):
+                self.manager.recover_saved_sources()
+        self.manager.recover_saved_sources()
+        self.assertEqual(self.manager.store.server_policy(self.subscription)['records'][0], original)
+        key = (original['provider_id'], original['source_identity'])
+        self.assertEqual(self.manager.store.remember_server_sources({key: {'wrong': 'replacement'}}), 0)
+        self.assertEqual(self.manager.store.server_policy(self.subscription)['records'][0], original)
+
     def test_native_only_upstream_changes_require_relinking(self):
         original = protocols.parse(json.dumps({'outbounds': [node()]}).encode(), 'Provider')[0]
         self.document = [original.outputs['xray'] | {'tag': 'Japan', 'mux': {'enabled': False}}]
@@ -392,9 +596,11 @@ class ServerPolicyTests(unittest.TestCase):
         self.manager.refresh()
         self.assertEqual(self.manager.snapshot['inventory'][0]['id'], portable)
         record = self.policy()['records'][0]
-        self.assertEqual(record['status'], 'unavailable')
+        self.assertEqual(record['status'], 'working')
+        self.assertFalse(record['source_present'])
         self.assertNotEqual(record['suggestions'][0]['source_identity'], previous)
-        self.assertEqual(self.feed().status_code, 503)
+        self.assertEqual(self.feed().status_code, 200)
+        self.assertEqual(self.feed(file='xray.json').json()['outbounds'][0]['mux'], {'enabled': False})
 
     def test_policy_request_size_is_bounded_without_relaxing_other_endpoints(self):
         path = '/api/subscriptions/' + self.subscription + '/servers'
@@ -408,6 +614,42 @@ class ServerPolicyTests(unittest.TestCase):
 
 
 class ServerPolicyFormatTests(unittest.TestCase):
+    def test_saved_sources_preserve_exact_native_dependencies_without_unrelated_servers(self):
+        native = node() | {'detour': 'Hop'}
+        mihomo = {'type': 'vless', 'name': 'Main', 'server': 'source.example', 'port': 443, 'uuid': UUID,
+                  'dialer-proxy': 'Hop', 'native-extra': {'preserve': True}}
+        xray = protocols.native_to_xray(node()) | {'proxySettings': {'tag': 'Hop'}}
+        for kind, raw, helper, unrelated in (
+            ('singbox', native, {'type': 'direct', 'tag': 'Hop'}, node('Unrelated', 'unrelated.example')),
+            ('mihomo', mihomo, {'type': 'direct', 'name': 'Hop'}, mihomo | {'name': 'Unrelated'}),
+            ('xray', xray, {'protocol': 'freedom', 'tag': 'Hop', 'settings': {'domainStrategy': 'UseIP'}}, xray | {'tag': 'Unrelated'}),
+        ):
+            with self.subTest(kind=kind):
+                entry = protocols.adapt(kind, raw, 'Provider', 'Main', [raw, helper, unrelated], 3)
+                record = {'source_identity': server_policy.source_key(entry), '_snapshot': server_policy.freeze(entry)}
+                self.assertEqual(record['_snapshot']['context'], [helper])
+                restored = server_policy.restore(json.loads(json.dumps(record)), 'Renamed provider')
+                self.assertEqual(restored.outputs, entry.outputs)
+                self.assertEqual(server_policy.source_key(restored), record['source_identity'])
+                for core in entry.outputs:
+                    self.assertEqual(protocols.bundle(restored, core, 'Saved'), protocols.bundle(entry, core, 'Saved'))
+                self.assertEqual(restored.source, 'Renamed provider')
+
+    def test_snapshot_limits_and_binding_checks_reject_unusable_saved_data(self):
+        entry = protocols.parse(json.dumps({'outbounds': [node()]}).encode(), 'Provider')[0]
+        record = {'source_identity': server_policy.source_key(entry), '_snapshot': server_policy.freeze(entry)}
+        with patch.object(server_policy, 'MAX_SNAPSHOT_BYTES', 10):
+            with self.assertRaises(common.SubscriptionError):
+                server_policy.freeze(entry)
+            self.assertIsNone(server_policy.restore(record, 'Provider'))
+        for snapshot in ({}, record['_snapshot'] | {'version': 2}, record['_snapshot'] | {'kind': 'unknown'},
+                         record['_snapshot'] | {'original': node() | {'uuid': '11234567-89ab-4cde-8fab-0123456789ab'}}):
+            with self.subTest(fields=list(snapshot)):
+                self.assertIsNone(server_policy.restore(record | {'_snapshot': snapshot}, 'Provider'))
+        dependent = protocols.adapt('singbox', node() | {'detour': 'Missing'}, 'Provider', 'Missing')
+        with self.assertRaises(common.SubscriptionError):
+            server_policy.freeze(dependent)
+
     def test_source_bindings_ignore_uri_and_encoded_vmess_display_names(self):
         raw = {'v': '2', 'ps': 'First name', 'add': 'vmess.example', 'port': '443', 'id': UUID,
                'aid': '0', 'net': 'tcp', 'type': 'none', 'tls': ''}

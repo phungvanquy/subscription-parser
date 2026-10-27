@@ -176,37 +176,45 @@ to every filtered saved entry across all pages; they retain existing overrides.
 
 Choose **Edit** on a saved row to open its address, port, and name fields. Only
 one editor opens at a time, and drafts survive paging, filtering, and tab changes.
-Provider values appear beside the overrides. Blank fields inherit provider values.
+Saved source values appear beside the overrides. Blank fields inherit those values.
 **Reset** clears one override;
 **Forget saved server** removes its saved selection and edits when you save the
 form. Unchecking a selection preserves its overrides. Up to 1000 source servers
 can be saved in each subscription. Bulk actions stay in the draft until you save;
 Cancel discards them. Save and validation errors remain visible at the bottom.
 
-Provider sampling remains authoritative. Saved selections do not pin servers into
-a provider's random sample or fill vacancies with replacements. A selected server
-that disappears, fails, leaves the sample, or belongs to a paused/removed provider
-stays saved but contributes no working configuration. It can resume publication
-when the same source returns and the required checks pass. Selecting five servers
-does not guarantee five will appear in the feed on every refresh.
+Saving a server also saves its complete source configuration and required proxy
+dependencies. It stays in your subscription while its own connection checks pass,
+even if a provider refresh removes it, changes its source, or draws a different
+random sample. The provider's ordinary random sample and other subscriptions
+remain unchanged. Saved servers are additional entries in their own subscription.
+A failed or expired saved connection is excluded from client feeds but remains
+in the editor and is checked again. Deselecting it, forgetting it, removing its
+provider from the subscription, or pausing/removing the provider excludes it.
 
 Matching uses a fingerprint of the original native configuration within its
 provider, including settings specific to one client. Your own
 name/address/port overrides do not alter that binding. Ordinary source renames
 are recognized; changed credentials, endpoints, transports, or dependencies may
-produce a different identity. Such changes require **Relink source…** or an
-explicitly chosen suggested match. Names and addresses are hints, not automatic
+produce a different identity. The saved configuration keeps working independently;
+use **Relink source…** or an explicitly chosen suggested match to adopt a changed
+source. Names and addresses are hints, not automatic
 proof of identity. Relinking retains the saved selection and overrides. No stable
 upstream node-ID contract is assumed for the currently supported imports.
 
 Address and port overrides preserve the source's credentials, TLS/SNI, transport,
 and native client settings. A single port replaces any port-hopping range. An
-unsupported endpoint shape is excluded for the affected client. Both the original
-source and the effective customized configuration need current passing checks for
-each client format. Name-only edits reuse connection checks. Saving queues needed
+unsupported endpoint shape is excluded for the affected client. The saved,
+customized configuration needs a current passing check for each client format;
+the original source does not need to pass separately. Name-only edits reuse checks. Saving queues needed
 checks without fetching providers; pending or failed custom endpoints are not
 published. Editing one subscription leaves other subscriptions and provider
 configurations unchanged. Import URLs remain stable.
+
+Older saved overrides are upgraded from exact matches in cached provider responses,
+including servers outside the current random sample. If the original configuration
+is no longer available in that cache, relink it to a working source once. The editor
+never substitutes credentials merely because a server has a similar name or address.
 
 The editor keeps a local draft while the dashboard polls. **Cancel** discards that
 draft. Concurrent server-policy edits are rejected; reopen the editor to review
