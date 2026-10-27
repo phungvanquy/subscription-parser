@@ -206,6 +206,33 @@ def check_subscription_server_policy(page, manager, checks):
         assert page.request.get(url).status == 503
         assert manager.store.server_policy(identifier)['records'][0]['address'] == 'relay.example.org'
         checks.append('working saved servers survive provider changes; explicit relinking updates sources and deselection retains edits')
+
+        # Batch edits use the same real save/check/publication path for both an
+        # existing deselected source and a newly added, selected source.
+        baseline = manager.snapshot['exports']['hiddify.json']
+        page.locator('#customize-subscription').click()
+        page.locator('#policy-tab-available').click()
+        page.locator('#policy-available-search').fill('Tokyo')
+        page.locator('.policy-available-row').filter(has_text='Tokyo').first.locator('[data-add]').click()
+        expect(page.locator('.policy-record')).to_have_count(2)
+        page.locator('#policy-batch-page').click()
+        page.locator('#policy-batch-address').fill('batch.example.org')
+        page.locator('#policy-batch-port').fill('9443')
+        page.locator('#policy-batch-apply').click()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        saved = manager.store.server_policy(identifier)['records']
+        assert len(saved) == 2 and all(row['address'] == 'batch.example.org' and row['port'] == 9443 for row in saved)
+        assert saved[0]['id'] == saved_id and not saved[0]['selected'] and saved[0]['name'] == 'Custom <Berlin>'
+        assert saved[1]['selected'] and saved[1]['name'] is None
+        assert all('_snapshot' in row for row in saved)
+        manager.begin_check(reuse_recent=True); manager.wait_for_idle(15)
+        nodes = page.request.get(url).json()['outbounds']
+        assert len(nodes) == 1 and nodes[0]['server'] == 'batch.example.org' and nodes[0]['server_port'] == 9443
+        assert nodes[0]['password'] == 'synthetic-password'
+        assert manager.snapshot['exports']['hiddify.json'] == baseline
+        page.evaluate('loadState()')
+        checks.append('batch edits save existing and new servers together, preserve inclusion and credentials, and publish after checks')
     finally:
         manager.fetcher = original_fetcher
         if page.locator('#policy-dialog').is_visible():
@@ -256,7 +283,8 @@ def check_large_server_policy(page, checks):
         expect(page.locator('#policy-saved-count')).to_have_text('1000 saved · 800 selected')
         expect(page.locator('.policy-record-editor')).to_have_count(0)
         expect(page.locator('#policy-available-panel')).not_to_be_visible()
-        assert len(page.locator('#policy-records input').all()) == 25
+        expect(page.locator('#policy-records [data-selected]')).to_have_count(25)
+        expect(page.locator('#policy-records [data-batch]')).to_have_count(25)
         page.locator('#policy-saved-page-select').select_option('39')
         expect(rows.first).to_contain_text('Server 0975')
         page.locator('#policy-saved-previous').click()
@@ -367,6 +395,184 @@ def check_large_server_policy(page, checks):
         assert len(writes[-1]['records']) == 50
         assert len({row['source_identity'] for row in writes[-1]['records']}) == 50
         checks.append('available-server page can be added in one action without duplicate bindings or exceeding the saved-server limit')
+    finally:
+        if page.locator('#policy-dialog').is_visible():
+            page.keyboard.press('Escape')
+        page.unroute(pattern, response)
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        page.evaluate('showSubscriptionList()')
+
+
+def check_batch_server_policy(page, checks):
+    """Check explicit batch membership, atomic draft updates and save/cancel behavior."""
+    page.locator('.nav-item[data-page=exports]').click()
+    page.evaluate("showSubscription('default')")
+    records = [{'id': f'batch-{index}', 'provider_id': f'provider-{index % 2}',
+                'provider_name': f'Provider {index % 2}', 'source_identity': f'{index:064x}',
+                'source': {'name': f'Batch server {index:02}', 'protocol': 'vless',
+                           'address': f'original-{index}.example.org', 'port': 443},
+                'selected': index % 3 != 0, 'address': f'custom-{index}.example.org',
+                'port': 5000 + index, 'name': f'Custom {index:02}', 'source_present': index != 3,
+                'status': 'unavailable' if index == 3 else 'working', 'checks': {}, 'suggestions': []}
+               for index in range(60)]
+    candidate = {'provider_id': 'provider-0', 'provider_name': 'Provider 0', 'source_identity': 'f' * 64,
+                 'source': {'name': 'Replacement', 'protocol': 'vless', 'address': 'replacement.example.org', 'port': 443}}
+    fixture = {'revision': 3, 'all_servers': False, 'records': records, 'available': [candidate],
+               'available_total': 1, 'offset': 0, 'limit': 50, 'max_records': 1000}
+    writes, fail_save = [], [False]
+    def response(route):
+        if route.request.method == 'PUT':
+            writes.append(route.request.post_data_json)
+            route.fulfill(status=409 if fail_save[0] else 200,
+                          json={'detail': 'Concurrent change; retry test'} if fail_save[0] else {'revision': 4})
+        else:
+            route.fulfill(json=fixture)
+    pattern = '**/api/subscriptions/default/servers*'
+    page.route(pattern, response)
+    try:
+        page.locator('#customize-subscription').click()
+        rows = page.locator('.policy-record')
+        panel = page.locator('#policy-batch-panel')
+        expect(rows).to_have_count(25)
+        expect(panel).not_to_be_visible()
+        rows.nth(1).locator('[data-batch]').check()
+        rows.nth(3).locator('[data-batch]').check()
+        expect(panel).to_be_visible()
+        expect(page.locator('#policy-batch-count')).to_have_text('Edit 2 selected servers')
+        expect(page.locator('#policy-batch-apply')).to_be_disabled()
+        expect(rows.nth(1).locator('[data-selected]')).to_be_checked()
+        expect(rows.nth(3).locator('[data-selected]')).not_to_be_checked()
+        page.locator('#policy-saved-next').click()
+        rows.nth(1).locator('[data-batch]').check()  # Record 26, on another page.
+        expect(page.locator('#policy-batch-scope')).to_contain_text('Includes 2')
+        page.locator('#policy-batch-address').fill('relay.example.org')
+        page.evaluate('loadState()')
+        expect(page.locator('#policy-batch-address')).to_have_value('relay.example.org')
+        page.locator('#policy-provider-filter').select_option('provider-0')
+        expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+        page.locator('#policy-batch-port').fill('70000')
+        page.locator('#policy-batch-apply').click()
+        expect(page.locator('#policy-batch-error')).to_contain_text('between 1 and 65535')
+        expect(page.locator('[data-policy-index="26"] .policy-endpoint')).to_have_text('custom-26.example.org:5026')
+        page.locator('#policy-batch-port').fill('8443')
+        for address in ('https://relay.example.org/path', 'relay.example.org:443', 'relay example.org', '[not:ipv6]'):
+            page.locator('#policy-batch-address').fill(address)
+            page.locator('#policy-batch-apply').click()
+            expect(page.locator('#policy-batch-error')).to_contain_text('without a URL, path, or port')
+            expect(page.locator('[data-policy-index="26"] .policy-endpoint')).to_have_text('custom-26.example.org:5026')
+        page.locator('#policy-batch-address').fill('relay.example.org')
+        page.locator('#policy-batch-port').fill('')
+        page.locator('#policy-batch-apply').click()
+        expect(page.locator('[data-policy-index="26"] .policy-endpoint')).to_have_text('relay.example.org:5026')
+        expect(page.locator('#policy-batch-address')).to_have_value('')
+        page.locator('#policy-provider-filter').select_option('')
+        expect(rows.nth(1).locator('.policy-endpoint')).to_have_text('relay.example.org:5001')
+        expect(rows.nth(3).locator('.policy-endpoint')).to_have_text('relay.example.org:5003')
+        expect(rows.first.locator('.policy-endpoint')).to_have_text('custom-0.example.org:5000')
+        page.locator('#policy-batch-port').fill('9443')
+        page.locator('#policy-tab-available').click()
+        expect(panel).not_to_be_visible()
+        page.locator('#policy-save').click()
+        expect(panel).to_be_visible()
+        expect(page.locator('#policy-batch-error')).to_contain_text('Apply these batch fields')
+        assert not writes
+        page.locator('#policy-batch-port').press('Enter')
+        expect(page.locator('#policy-batch-port')).to_have_value('')
+        expect(rows.nth(1).locator('.policy-endpoint')).to_have_text('relay.example.org:9443')
+        assert not writes
+        checks.append('batch selection survives pages, filters, tabs and polling; invalid input changes no rows and blanks retain overrides')
+
+        for width in (1440, 768, 390, 320):
+            page.set_viewport_size({'width': width, 'height': 1000 if width > 640 else 844})
+            assert page.locator('#policy-dialog').evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            assert panel.evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            assert page.locator('.policy-editor-body').evaluate('el => el.scrollWidth <= el.clientWidth'), width
+            rows.nth(4).locator('[data-batch]').check()
+            expect(page.locator('#policy-batch-count')).to_have_text('Edit 4 selected servers')
+            rows.nth(4).locator('[data-batch]').uncheck()
+            expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+            expect(page.locator('#policy-batch-apply')).to_be_in_viewport()
+            expect(page.locator('#policy-save')).to_be_in_viewport()
+            if width in (1440, 390) and os.environ.get('PARSER_TEST_SCREENSHOTS'):
+                page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS'] + f'/server-policy-batch-{width}.png')
+        page.set_viewport_size({'width': 1440, 'height': 1000})
+        fail_save[0] = True
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-error')).to_contain_text('Concurrent change')
+        expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+        expect(rows.nth(1).locator('[data-batch]')).to_be_checked()
+        fail_save[0] = False
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert writes[0] == writes[1]
+        assert writes[1]['revision'] == 3 and not writes[1]['all_servers']
+        for index, saved in enumerate(writes[-1]['records']):
+            expected = {key: records[index][key] for key in ('id', 'provider_id', 'source_identity', 'selected', 'address', 'port', 'name')}
+            if index in (1, 3, 26):
+                expected.update(address='relay.example.org', port=9443)
+            assert saved == expected, index
+        checks.append('batch panel fits 320–1440px; a failed save keeps the draft and only checked endpoints enter the final update')
+
+        page.locator('#customize-subscription').click()
+        expect(panel).not_to_be_visible()
+        expect(page.locator('[data-batch]:checked')).to_have_count(0)
+        page.locator('#policy-mode').select_option('all')
+        expect(page.locator('[data-selected]')).to_have_count(0)
+        rows.nth(1).locator('[data-batch]').check()
+        rows.nth(3).locator('[data-batch]').check()
+        rows.first.locator('[data-edit]').click()
+        page.locator('[data-remove]').click()  # Indices move; membership must not.
+        rows.first.locator('[data-edit]').click()
+        page.locator('[data-relink]').click()
+        page.locator('[data-add]').click()  # Same saved row, a new source binding.
+        expect(rows.first.locator('[data-batch]')).to_be_checked()
+        page.locator('#policy-batch-address').fill('[2001:db8::1]')
+        page.locator('#policy-batch-port').fill('8443')
+        page.locator('#policy-batch-apply').click()
+        expect(rows.first.locator('.policy-endpoint')).to_have_text('[2001:db8::1]:8443')
+        page.locator('#policy-batch-clear').click()
+        expect(panel).not_to_be_visible()
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        saved = writes[-1]['records']
+        assert len(saved) == 59 and writes[-1]['all_servers']
+        assert saved[0]['id'] == 'batch-1' and saved[0]['source_identity'] == candidate['source_identity'] and saved[0]['relink']
+        for row in saved:
+            index = int(row['id'].split('-')[1])
+            assert row['address'] == ('2001:db8::1' if index in (1, 3) else records[index]['address'])
+            assert row['port'] == (8443 if index in (1, 3) else records[index]['port'])
+            assert row['selected'] == records[index]['selected'] and row['name'] == records[index]['name']
+        checks.append('batch edits work in all-servers mode and retain exact membership through removal and explicit relinking')
+
+        page.locator('#customize-subscription').click()
+        page.locator('#policy-batch-page').click()
+        expect(page.locator('[data-batch]:checked')).to_have_count(25)
+        expect(page.locator('#policy-batch-count')).to_have_text('Edit 25 selected servers')
+        expect(page.locator('#policy-batch-page')).to_be_disabled()
+        page.locator('#policy-saved-next').click()
+        expect(page.locator('[data-batch]:checked')).to_have_count(0)
+        expect(page.locator('#policy-batch-page')).to_be_enabled()
+        page.locator('#policy-batch-port').fill('8443')
+        page.locator('#policy-batch-clear').click()
+        expect(panel).not_to_be_visible()
+        rows.first.locator('[data-batch]').check()
+        expect(page.locator('#policy-batch-port')).to_have_value('')
+        rows.first.locator('[data-batch]').uncheck()
+        expect(panel).not_to_be_visible()
+        rows.first.locator('[data-batch]').check()
+        rows.first.locator('[data-edit]').click()
+        page.locator('[data-remove]').click()
+        expect(panel).not_to_be_visible()
+        rows.first.locator('[data-batch]').check()
+        page.locator('#policy-batch-port').fill('8443')
+        page.locator('#policy-batch-apply').click()
+        page.locator('#policy-dialog [data-close=policy-dialog]').last.click()
+        assert len(writes) == 3
+        page.locator('#customize-subscription').click()
+        expect(panel).not_to_be_visible()
+        expect(page.locator('[data-batch]:checked')).to_have_count(0)
+        expect(rows.first.locator('.policy-endpoint')).to_have_text('custom-0.example.org:5000')
+        checks.append('page selection is bounded; clearing, unchecking, removal and Cancel clear temporary batch state without saving')
     finally:
         if page.locator('#policy-dialog').is_visible():
             page.keyboard.press('Escape')
@@ -1147,6 +1353,7 @@ def main():
                 check_large_subscription_list(page, checks)
                 check_subscription_server_policy(page, manager, checks)
                 check_large_server_policy(page, checks)
+                check_batch_server_policy(page, checks)
 
                 page.locator('.nav-item[data-page=providers]').click()
                 limited_row = page.locator('#provider-rows .provider-row').filter(has_text='Demo 2')

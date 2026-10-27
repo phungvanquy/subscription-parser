@@ -174,6 +174,19 @@ selector. Search names, addresses, or ports, and filter by provider, selection,
 overrides, or connection status. **Include matches** and **Exclude matches** apply
 to every filtered saved entry across all pages; they retain existing overrides.
 
+To change several endpoints together, tick their **Batch** checkboxes in
+**Saved servers**, or choose **Select page for editing**. A panel appears with
+**Domain / IP address** and **Port** fields. Enter either or both values and choose
+**Apply to selected**, then **Save server settings**. Blank batch fields keep each
+server's current value; they do not clear existing overrides. Names and other
+connection settings are preserved. Batch selection is separate from inclusion
+in the subscription and works in either inclusion mode.
+
+You can select servers across pages and filters; the panel shows how many selected
+servers are outside the current page. **Clear selection** unchecks the batch
+boxes and clears unapplied batch fields. Applied edits remain in the draft until
+you save or cancel. Closing without saving discards the draft and batch selection.
+
 Choose **Edit** on a saved row to open its address, port, and name fields. Only
 one editor opens at a time, and drafts survive paging, filtering, and tab changes.
 Saved source values appear beside the overrides. Blank fields inherit those values.

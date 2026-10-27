@@ -161,8 +161,13 @@ The implementation preserves these boundaries:
    entries and paginated working candidates. The browser renders 25 compact saved
    rows and at most one expanded editor, with separate saved/add tabs, provider
    and status filters, page jumps, and bulk actions over explicit filtered matches.
-   It keeps its draft across polling, paging, and filtering, supports field resets
-   and explicit relinking, and clears private dialog state on close/logout.
+   Separate batch checkboxes collect rows across pages and filters. A shared
+   address/port panel updates only those draft rows; blank fields keep their
+   existing values. Row references keep that temporary selection stable through
+   removals and explicit relinking. Batch selection never changes inclusion flags
+   or enters the API payload. The editor keeps its draft across polling, paging,
+   and filtering, supports field resets and explicit relinking, and clears
+   private dialog state on close/logout.
    Only the policy PUT receives a 1 MiB
    request allowance; other mutation limits remain 16 KiB.
 
@@ -221,7 +226,8 @@ working/client counts, shared servers, pending/expired/failed checks, action men
 keyboard focus during polling, and mobile filtering. They do not change the live
 deployment.
 Server-policy checks exercise 1000 saved entries, bounded row rendering, bulk
-selection across pages, page addition without duplicates, draft persistence,
+selection across pages, shared endpoint edits independent of inclusion, blank-field
+preservation, invalid batch inputs without partial changes, page addition without duplicates, draft persistence,
 invalid hidden ports, failed-save recovery, and layouts from 320 to 1440 pixels.
 The suite also holds a single-provider check open to verify that its progress
 names the selected provider while other rows remain idle.

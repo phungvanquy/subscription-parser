@@ -182,10 +182,10 @@
       <section id="policy-saved-panel" class="policy-section" role="tabpanel" aria-labelledby="policy-tab-saved">
         <div class="policy-list-tools">
           <div class="policy-filters"><label class="sr-only" for="policy-saved-search">Search saved servers</label><input id="policy-saved-search" type="search" placeholder="Search names, addresses or ports…"><label class="sr-only" for="policy-provider-filter">Filter saved servers by provider</label><select id="policy-provider-filter"><option value="">All providers</option></select><label class="sr-only" for="policy-status-filter">Filter saved servers</label><select id="policy-status-filter"><option value="">All saved servers</option><option value="selected">Selected</option><option value="unselected">Not selected</option><option value="overrides">With overrides</option><option value="unavailable">Unavailable</option><option value="pending_or_failed">Checks pending / failed</option><option value="working">Working</option><option value="unsaved">Edited</option></select></div>
-          <div class="policy-list-actions"><span id="policy-saved-count" role="status"></span><div id="policy-bulk-selection"><button type="button" class="text-button" id="policy-include-matches">Include matches</button><button type="button" class="text-button" id="policy-exclude-matches">Exclude matches</button></div></div>
+          <div class="policy-list-actions"><span id="policy-saved-count" role="status"></span><div><button type="button" class="text-button" id="policy-batch-page">Select page for editing</button><div id="policy-bulk-selection"><button type="button" class="text-button" id="policy-include-matches">Include matches</button><button type="button" class="text-button" id="policy-exclude-matches">Exclude matches</button></div></div></div>
           <div class="policy-pagination"><span id="policy-saved-page"></span><div class="policy-page-buttons"><button type="button" class="button secondary small" id="policy-saved-previous">Previous</button><select id="policy-saved-page-select" aria-label="Saved servers page"></select><button type="button" class="button secondary small" id="policy-saved-next">Next</button></div></div>
         </div>
-        <table class="policy-table" aria-label="Saved servers"><thead><tr><th scope="col">Include</th><th scope="col">Server / provider</th><th scope="col">Address / port</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Edit server</span></th></tr></thead><tbody id="policy-records"></tbody></table>
+        <table class="policy-table" aria-label="Saved servers"><thead><tr><th scope="col">Batch</th><th scope="col">Include</th><th scope="col">Server / provider</th><th scope="col">Address / port</th><th scope="col">Connection</th><th scope="col"><span class="sr-only">Edit server</span></th></tr></thead><tbody id="policy-records"></tbody></table>
         <p id="policy-saved-empty" class="hint policy-empty" hidden></p>
       </section>
       <section id="policy-available-panel" class="policy-section" role="tabpanel" aria-labelledby="policy-tab-available" hidden>
@@ -199,6 +199,17 @@
       </section>
     </div>
     </div>
+    <section id="policy-batch-panel" class="policy-batch-panel" aria-labelledby="policy-batch-count" hidden>
+      <div class="policy-batch-heading"><h3 id="policy-batch-count" aria-live="polite"></h3><button type="button" class="text-button" id="policy-batch-clear">Clear selection</button></div>
+      <p id="policy-batch-scope" class="hint" hidden></p>
+      <div class="policy-batch-fields">
+        <div><label for="policy-batch-address">Domain / IP address</label><input id="policy-batch-address" type="text" maxlength="253" placeholder="Keep current address" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="policy-batch-hint"></div>
+        <div><label for="policy-batch-port">Port</label><input id="policy-batch-port" type="number" min="1" max="65535" step="1" placeholder="Keep current" autocomplete="off" aria-describedby="policy-batch-hint"></div>
+        <button id="policy-batch-apply" type="button" class="button secondary small" disabled>Apply to selected</button>
+      </div>
+      <p id="policy-batch-hint" class="hint">Blank fields keep each server’s current value. Apply updates the draft; save to run connection checks.</p>
+      <div id="policy-batch-error" class="form-error" role="alert"></div>
+    </section>
     <div class="dialog-actions"><div class="policy-footer-message"><span class="hint">Changes apply when you save.</span><div id="policy-error" class="form-error" role="alert"></div></div><button type="button" class="button secondary" data-close="policy-dialog">Cancel</button><button type="submit" class="button primary" id="policy-save" disabled>Save server settings</button></div>
   </form></dialog>
 
