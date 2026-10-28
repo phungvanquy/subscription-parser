@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import re
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import yaml
 from . import common, hysteria, xhttp
@@ -29,7 +29,7 @@ TARGETS = ("hiddify", "mihomo", "xray")
 def adapter_policy():
     # Rebuild cached exports after adapter changes without redrawing samples or
     # changing server identities. Exact, unchanged core checks remain reusable.
-    return {"version": 5, "mihomo_reality_compatibility":
+    return {"version": 6, "mihomo_reality_compatibility":
             env_bool('PARSER_MIHOMO_REALITY_COMPATIBILITY')}
 
 
@@ -618,6 +618,80 @@ def uri_to_native(uri, notes):
     return valid_native(node), label
 
 
+def xhttp_uri_to_xray(uri):
+    """Fallback for rejected VLESS/XHTTP links, using the verified native adapter.
+
+    Keep the original URI on the Entry for identity, saved edits and URI exports.
+    Only packet-up extra settings understood by the existing mapper are admitted.
+    """
+    if uri.partition('://')[0].lower() != 'vless':
+        return None
+    parsed = urlsplit(uri)
+    if dict(parse_qsl(parsed.query)).get('type') != 'xhttp':
+        return None
+    if (re.search(r'[\x00-\x20\x7f]|%(?![0-9a-fA-F]{2})', uri)
+            or parsed.path or parsed.password is not None):
+        raise Error('malformed VLESS/XHTTP link')
+    pairs = parse_qsl(parsed.query, keep_blank_values=True, errors='strict', max_num_fields=100)
+    query = dict(pairs)
+    if len(query) != len(pairs):
+        raise Error('duplicate XHTTP link parameters are ambiguous')
+    if not query.get('extra') and 'quicSecurity' not in query:
+        return None
+    # Some exporters include this inactive QUIC default on XHTTP links. Never
+    # discard a non-default value, certificate pins or unknown nonempty options.
+    if query.get('quicSecurity', '') not in ('', 'none'):
+        raise Error('non-default QUIC security on an XHTTP link is unsupported')
+    if query.get('serviceName') or query.get('authority'):
+        raise Error('XHTTP serviceName/authority settings have no verified mapping')
+    flags = [query[key].lower() for key in ('insecure', 'allowInsecure') if key in query]
+    if any(value not in ('', '0', '1', 'false', 'true', 'no', 'yes') for value in flags):
+        raise Error('XHTTP TLS verification flags must be boolean')
+    if len({enabled(value) for value in flags}) > 1:
+        raise Error('conflicting XHTTP TLS verification flags')
+    if query.get('sni') and query.get('peer') and query['sni'] != query['peer']:
+        raise Error('conflicting XHTTP TLS server names')
+    security = query.get('security', 'none')
+    if security != 'reality' and any(query.get(k) for k in ('pbk', 'sid', 'spx')):
+        raise Error('REALITY settings require REALITY security')
+    if security == 'none' and (any(query.get(k) for k in ('sni', 'peer', 'fp', 'alpn'))
+                               or any(enabled(value) for value in flags)):
+        raise Error('TLS settings require TLS or REALITY security')
+
+    extra = None
+    if query.get('extra'):
+        if len(query['extra'].encode()) > 65536:
+            raise Error('XHTTP extra exceeds the 64 KiB limit')
+        def object_pairs(items):
+            result = dict(items)
+            if len(result) != len(items):
+                raise Error('duplicate XHTTP extra keys are ambiguous')
+            return result
+        def invalid_constant(value):
+            raise Error('XHTTP extra numbers must be integers or range strings')
+        try:
+            extra = json.loads(query['extra'], object_pairs_hook=object_pairs,
+                               parse_constant=invalid_constant, parse_float=invalid_constant)
+        except (ValueError, RecursionError):
+            raise Error('invalid XHTTP extra JSON') from None
+        if not isinstance(extra, dict):
+            raise Error('XHTTP extra must be an object')
+        for key in xhttp.BASE & extra.keys():
+            xhttp.text(extra[key])
+
+    base_query = [(k, v) for k, v in pairs if k not in {'extra', 'quicSecurity'}]
+    base, label = uri_to_native(urlunsplit(parsed._replace(query=urlencode(base_query))), [])
+    raw = native_to_xray(base)
+    if extra is not None:
+        settings = raw['streamSettings']['xhttpSettings']
+        settings['extra'] = extra
+        if extra:
+            xhttp.mihomo_options(settings)  # Validate without rewriting the original extra.
+    if security == 'reality' and query.get('spx'):
+        raw['streamSettings']['realitySettings']['spiderX'] = query['spx']
+    return raw, label
+
+
 @dataclass
 class Entry:
     name: str
@@ -684,6 +758,22 @@ def adapt(kind, raw, source, label, context=None, group_size=1):
         for client in TARGETS:
             if client not in entry.outputs:
                 entry.issues[client] = reason
+    if native is None and kind == 'uri':
+        try:
+            fallback = xhttp_uri_to_xray(raw)
+            if fallback is not None:
+                converted = adapt('xray', fallback[0], source, fallback[1])
+                entry.name, entry.protocol = converted.name, converted.protocol
+                entry.outputs, entry.issues, entry.notes = converted.outputs, converted.issues, converted.notes
+                if entry.issues.get('hiddify') == 'advanced XHTTP extra settings require link import':
+                    entry.issues['hiddify'] = 'advanced XHTTP settings have no verified Hiddify mapping'
+                if fallback[0]['streamSettings'].get('realitySettings', {}).get('spiderX') not in (None, '', '/'):
+                    for client in ('mihomo', 'hiddify'):
+                        entry.outputs.pop(client, None)
+                        entry.issues[client] = 'REALITY spiderX has no verified mapping for this client'
+        except (Error, ValueError, KeyError, TypeError, IndexError, RecursionError) as exc:
+            reason = str(exc) if isinstance(exc, Error) else 'malformed or incomplete proxy settings'
+            entry.issues = {client: reason for client in TARGETS}
     if (native is None and kind == 'xray' and raw.get('protocol') == 'vless'
             and isinstance(raw.get('streamSettings'), dict)
             and raw['streamSettings'].get('network') in ('xhttp', 'splithttp')):

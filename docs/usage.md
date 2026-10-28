@@ -340,6 +340,16 @@ query paths retain their original configuration. This adapter adds only Mihomo;
 existing Xray/Hiddify outputs, source identities, and provider samples stay stable.
 New Mihomo variants publish only after their own connection checks pass.
 
+VLESS/XHTTP share links with these verified `packet-up` options in an `extra`
+JSON object now use the same mapping. The original `extra`, credentials, TLS
+settings, URI, and saved server identity are preserved. An inactive
+`quicSecurity=none` parameter is accepted. Malformed or ambiguous parameters,
+unknown advanced options, and nonempty certificate pins without a mapping are
+rejected. `extra` is limited to 64 KiB. Existing successful link conversions keep
+their current behavior. Advanced options without a verified Hiddify mapping
+remain excluded from Hiddify. Each new client configuration must pass validation
+and its own connection check; source TLS verification settings are never relaxed.
+
 ### Hysteria details
 
 Supported exports preserve authentication, IPv6, TLS server name and verification,
