@@ -145,7 +145,7 @@ The implementation preserves these boundaries:
    connection checks, even if the source disappears or fails. Their results have
    the normal expiry deadline. Provider-draw promotion depends only on sampled
    configurations, so saved entries cannot stall refreshes. Exact-configuration
-   guards reject late results for edited/forgotten entries while retaining valid
+   guards reject late results for edited/removed entries while retaining valid
    results for saved configurations unaffected by a redraw. Provider disablement
    and subscription/provider deselection still prevent publication.
 5. **Isolation and recovery.** Custom scope keys include subscription ID, provider
@@ -163,8 +163,11 @@ The implementation preserves these boundaries:
    and status filters, page jumps, and bulk actions over explicit filtered matches.
    Separate batch checkboxes collect rows across pages and filters. A shared
    address/port panel updates only those draft rows; blank fields keep their
-   existing values. Row references keep that temporary selection stable through
-   removals and explicit relinking. Batch selection never changes inclusion flags
+   existing values. **Remove selected** removes those saved records from the draft;
+   it shares the single-row removal behavior, clears removed rows from batch
+   selection, and refreshes paging and available candidates. Row references keep
+   that temporary selection stable through removals and explicit relinking.
+   Batch selection never changes inclusion flags
    or enters the API payload. The editor keeps its draft across polling, paging,
    and filtering, supports field resets and explicit relinking, and clears
    private dialog state on close/logout.
@@ -226,7 +229,8 @@ working/client counts, shared servers, pending/expired/failed checks, action men
 keyboard focus during polling, and mobile filtering. They do not change the live
 deployment.
 Server-policy checks exercise 1000 saved entries, bounded row rendering, bulk
-selection across pages, shared endpoint edits independent of inclusion, blank-field
+selection and removal across pages and filters, cancellation and failed-save recovery
+after removal, shared endpoint edits independent of inclusion, blank-field
 preservation, invalid batch inputs without partial changes, page addition without duplicates, draft persistence,
 invalid hidden ports, failed-save recovery, and layouts from 320 to 1440 pixels.
 The suite also holds a single-provider check open to verify that its progress

@@ -287,7 +287,9 @@ Save the complete record list, using IDs and identities from this endpoint:
 ```
 
 The response is `{"revision": 1}`. For existing records, send their local `id`.
-Omitted records are forgotten. A deselected record retains its edits; selection
+Omitted records and their saved configurations and overrides are removed from
+this subscription. In `all_servers: true` mode, their provider originals can
+still be published. A deselected record retains its edits; selection
 flags are consulted only when `all_servers` is false. `all_servers: false` with
 an empty list publishes nothing. Overrides omitted or set to null/blank inherit
 saved source values; a port must be an integer from 1 to 65535 or null. Names accept

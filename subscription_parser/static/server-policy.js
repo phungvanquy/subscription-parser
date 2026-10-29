@@ -14,6 +14,7 @@
   const statusDetails={unavailable:'The saved configuration or selected provider is unavailable. Your edits are kept.',source_failed:'The source check failed or expired.',pending_or_failed:'Saved server connection checks are pending or failed.',working:'A compatible connection check passed.',unsaved:'These changes have not been saved yet.'};
   const statusDetail=row=>(statusDetails[row.status]||'')+(row.saved_configuration&&!row.source_present&&row.status!=='unavailable'?' This server uses its saved configuration and remains available while its checks pass.':'');
   const statusClass=row=>row.status==='working'?'fresh':row.status==='unsaved'?'pending':'unavailable';
+  const removalHint=()=>`Removes saved configurations and overrides when you save.${draft.all_servers?' Provider originals can still appear in All working servers mode.':''}`;
 
   function filteredRecords(){
     if(!draft)return [];
@@ -46,11 +47,14 @@
     const count=batchSelection.size,page=matches.slice(savedPage*pageSize,(savedPage+1)*pageSize);
     const elsewhere=count-page.filter(({row})=>batchSelection.has(row)).length;
     $('policy-batch-panel').hidden=!count||$('policy-saved-panel').hidden;
-    $('policy-batch-count').textContent=`Edit ${count} selected server${count===1?'':'s'}`;
+    $('policy-batch-count').textContent=`${count} server${count===1?'':'s'} selected`;
     $('policy-batch-scope').hidden=!elsewhere;
     $('policy-batch-scope').textContent=`Includes ${elsewhere} on other pages or hidden by filters.`;
     $('policy-batch-apply').textContent=`Apply to ${count} selected`;
     $('policy-batch-apply').disabled=working||!count||!hasBatchInput();
+    $('policy-batch-remove').textContent=`Remove ${count} selected`;
+    $('policy-batch-remove').disabled=working||!count;
+    $('policy-batch-remove-hint').textContent=removalHint();
     $('policy-batch-page').disabled=working||!page.some(({row})=>!batchSelection.has(row));
   }
   function renderProviders(){
@@ -65,7 +69,7 @@
     const checks=Object.entries(row.checks||{}).map(([core,value])=>`${core}: ${value.status}`).join(' · ');
     const bound=new Set(draft.records.map(binding));
     const suggestions=(row.suggestions||[]).map((candidate,i)=>bound.has(binding(candidate))?'':`<button type="button" class="text-button policy-suggestion" data-suggestion="${i}">Relink to ${esc(candidate.source.name)} · ${esc(endpoint(candidate.source))}</button>`).join('');
-    return `<tr class="policy-editor-row" data-policy-index="${index}"><td colspan="6"><div class="policy-record-editor" id="policy-editor-${index}"><div class="policy-edit-heading"><h4>Edit ${esc(row.name||row.source.name)}</h4><button type="button" class="text-button" data-done>Done editing</button></div><p class="hint policy-status-detail">${esc(statusDetail(row))}</p><div class="policy-fields">${fields}</div><p class="hint">Blank fields use saved source values. Address and port changes need a passing connection check.</p>${checks?`<p class="hint policy-health">${esc(checks)}</p>`:''}${suggestions?`<div class="policy-suggestions"><p class="hint">Possible source matches. Relinking keeps your overrides.</p>${suggestions}</div>`:''}<div class="policy-record-actions"><button type="button" class="text-button" data-relink>Relink source…</button><button type="button" class="text-button danger-text" data-remove>Forget saved server</button></div></div></td></tr>`;
+    return `<tr class="policy-editor-row" data-policy-index="${index}"><td colspan="6"><div class="policy-record-editor" id="policy-editor-${index}"><div class="policy-edit-heading"><h4>Edit ${esc(row.name||row.source.name)}</h4><button type="button" class="text-button" data-done>Done editing</button></div><p class="hint policy-status-detail">${esc(statusDetail(row))}</p><div class="policy-fields">${fields}</div><p class="hint">Blank fields use saved source values. Address and port changes need a passing connection check.</p>${checks?`<p class="hint policy-health">${esc(checks)}</p>`:''}${suggestions?`<div class="policy-suggestions"><p class="hint">Possible source matches. Relinking keeps your overrides.</p>${suggestions}</div>`:''}<div class="policy-record-actions"><button type="button" class="text-button" data-relink>Relink source…</button><button type="button" class="text-button danger-text" data-remove aria-describedby="policy-${index}-remove-hint">Remove saved server</button></div><p class="hint" id="policy-${index}-remove-hint">${removalHint()}</p></div></td></tr>`;
   }
   function renderRecords(){
     if(!draft)return;
@@ -74,7 +78,7 @@
     renderCounts();
     $('policy-records').innerHTML=matches.slice(savedPage*pageSize,(savedPage+1)*pageSize).map(({row,index})=>{
       const expanded=expandedIndex===index;
-      return `<tr class="policy-record${expanded?' is-editing':''}${batchSelection.has(row)?' is-batch-selected':''}" data-policy-index="${index}"><td class="policy-batch-choice"><label><input type="checkbox" data-batch ${batchSelection.has(row)?'checked':''} aria-label="Select ${esc(row.name||row.source.name)} for batch editing"><span>Batch</span></label></td><td class="policy-include">${draft.all_servers?'<span class="policy-auto" title="Included automatically while working">Auto</span>':`<label><input type="checkbox" data-selected ${row.selected?'checked':''} aria-label="Include ${esc(row.name||row.source.name)}"><span>Include</span></label>`}</td><td class="policy-server"><strong class="policy-name">${esc(row.name||row.source.name)}</strong><small>${esc(row.provider_name)} · ${esc(row.source.protocol)}</small></td><td class="policy-address"><span class="policy-endpoint" title="${esc(effectiveEndpoint(row))}">${esc(effectiveEndpoint(row))}</span><small class="policy-customized" ${hasOverrides(row)?'':'hidden'}>${row.status==='unsaved'?'Overrides in draft':'Customized'}</small></td><td class="policy-connection"><span class="status-pill policy-status ${statusClass(row)}" title="${esc(statusDetail(row))}">${esc(statusLabels[row.status]||'Saved')}</span></td><td class="policy-edit"><button type="button" class="text-button" data-edit aria-expanded="${expanded}" ${expanded?`aria-controls="policy-editor-${index}"`:''} aria-label="${expanded?'Close editor for':'Edit'} ${esc(row.name||row.source.name)}">${expanded?'Close':'Edit'}</button></td></tr>${expanded?editor(row,index):''}`;
+      return `<tr class="policy-record${expanded?' is-editing':''}${batchSelection.has(row)?' is-batch-selected':''}" data-policy-index="${index}"><td class="policy-batch-choice"><label><input type="checkbox" data-batch ${batchSelection.has(row)?'checked':''} aria-label="Select ${esc(row.name||row.source.name)} for batch actions"><span>Batch</span></label></td><td class="policy-include">${draft.all_servers?'<span class="policy-auto" title="Included automatically while working">Auto</span>':`<label><input type="checkbox" data-selected ${row.selected?'checked':''} aria-label="Include ${esc(row.name||row.source.name)}"><span>Include</span></label>`}</td><td class="policy-server"><strong class="policy-name">${esc(row.name||row.source.name)}</strong><small>${esc(row.provider_name)} · ${esc(row.source.protocol)}</small></td><td class="policy-address"><span class="policy-endpoint" title="${esc(effectiveEndpoint(row))}">${esc(effectiveEndpoint(row))}</span><small class="policy-customized" ${hasOverrides(row)?'':'hidden'}>${row.status==='unsaved'?'Overrides in draft':'Customized'}</small></td><td class="policy-connection"><span class="status-pill policy-status ${statusClass(row)}" title="${esc(statusDetail(row))}">${esc(statusLabels[row.status]||'Saved')}</span></td><td class="policy-edit"><button type="button" class="text-button" data-edit aria-expanded="${expanded}" ${expanded?`aria-controls="policy-editor-${index}"`:''} aria-label="${expanded?'Close editor for':'Edit'} ${esc(row.name||row.source.name)}">${expanded?'Close':'Edit'}</button></td></tr>${expanded?editor(row,index):''}`;
     }).join('');
     $('policy-saved-empty').hidden=matches.length>0;
     $('policy-saved-empty').textContent=draft.records.length?'No saved servers match these filters.':'No saved servers yet. Open Add servers to choose or customize a working server.';
@@ -181,6 +185,18 @@
   $('policy-batch-clear').addEventListener('click',()=>{
     batchSelection.clear();resetBatchFields();renderRecords();$($('policy-batch-page').disabled?'policy-saved-search':'policy-batch-page').focus();
   });
+  function removeSavedRecords(rows){
+    if(!draft||working||!rows.size)return;
+    const count=draft.records.length;
+    draft.records=draft.records.filter(row=>!rows.has(row));
+    for(const row of rows)batchSelection.delete(row);
+    if(!batchSelection.size)resetBatchFields();
+    expandedIndex=null;relinkIndex=null;
+    renderProviders();renderRecords();renderAvailable();$('policy-saved-search').focus();
+    const removed=count-draft.records.length;
+    toast(`${removed} saved server${removed===1?'':'s'} removed from your draft. Save to apply.`);
+  }
+  $('policy-batch-remove').addEventListener('click',()=>removeSavedRecords(new Set(batchSelection)));
   for(const id of ['policy-batch-address','policy-batch-port']){
     $(id).addEventListener('input',()=>{$('policy-batch-error').textContent='';renderBatch();});
     $(id).addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();applyBatch();}});
@@ -259,12 +275,12 @@
       if(expandedIndex!==null)focusEditor(index);else $('policy-records').querySelector(`[data-policy-index="${index}"] [data-edit]`)?.focus({preventScroll:true});
     }
     if(button.dataset.reset){const field=button.dataset.reset;row[field]=null;if(field==='port')row.invalidPort=false;row.status='unsaved';row.checks={};const input=$(`policy-${index}-${field}`);input.value='';input.focus();updateSummary(index);}
-    if(button.hasAttribute('data-remove')){batchSelection.delete(row);if(!batchSelection.size)resetBatchFields();draft.records.splice(index,1);expandedIndex=null;relinkIndex=null;renderProviders();renderRecords();renderAvailable();$('policy-saved-search').focus();}
+    if(button.hasAttribute('data-remove'))removeSavedRecords(new Set([row]));
     if(button.hasAttribute('data-relink')){relinkIndex=index;availableOffset=0;$('policy-available-search').value='';renderAvailable();showTab('available');loadAvailable();$('policy-available-search').focus();}
     if(button.hasAttribute('data-suggestion'))relink(index,row.suggestions[Number(button.dataset.suggestion)]);
   });
   function addCandidates(candidates,expand){
-    if(draft.records.length+candidates.length>draft.max_records){$('policy-error').textContent=`Only ${draft.max_records-draft.records.length} saved-server slots remain. Add fewer servers or forget unused entries.`;return;}
+    if(draft.records.length+candidates.length>draft.max_records){$('policy-error').textContent=`Only ${draft.max_records-draft.records.length} saved-server slots remain. Add fewer servers or remove unused entries.`;return;}
     const first=draft.records.length;
     for(const candidate of candidates)draft.records.push({...candidate,id:null,selected:true,address:null,port:null,name:null,source_present:true,status:'unsaved',checks:{},suggestions:[]});
     resetSavedFilters();savedPage=Math.floor(first/pageSize);expandedIndex=expand?first:null;renderProviders();renderRecords();renderAvailable();showTab('saved');

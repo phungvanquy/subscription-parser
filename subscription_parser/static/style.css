@@ -567,6 +567,9 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
 .policy-batch-fields > div { min-width: 0; }
 .policy-batch-fields label { font-size: 12px; margin: 4px 0 6px; }
 .policy-batch-fields input { font-size: 12px; padding: 9px 10px; }
+.policy-batch-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.policy-batch-actions > button { flex: 1; }
+#policy-form .danger-text { color: #aa463b; }
 .policy-batch-panel .hint { margin: 6px 0 0; }
 .policy-batch-panel .form-error:empty { display: none; }
 .policy-auto { font-size: 10px; color: var(--muted); }
@@ -650,7 +653,7 @@ input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--green); 
   .policy-available-row .button { max-width: 100px; }
   .policy-batch-panel { padding: 8px 17px 10px; }
   .policy-batch-fields { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 8px; }
-  .policy-batch-fields > button { grid-column: 1 / -1; }
+  .policy-batch-actions { grid-column: 1 / -1; }
   #policy-form .dialog-actions { flex-wrap: wrap; }
 }
 @media (max-height: 600px) {

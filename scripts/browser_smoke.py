@@ -233,6 +233,23 @@ def check_subscription_server_policy(page, manager, checks):
         assert manager.snapshot['exports']['hiddify.json'] == baseline
         page.evaluate('loadState()')
         checks.append('batch edits save existing and new servers together, preserve inclusion and credentials, and publish after checks')
+
+        page.locator('#customize-subscription').click()
+        page.locator('#policy-batch-page').click()
+        page.locator('#policy-batch-remove').click()
+        expect(page.locator('.policy-record')).to_have_count(0)
+        assert manager.store.server_policy(identifier)['records'] == saved
+        assert page.request.get(url).status == 200
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert manager.store.server_policy(identifier)['records'] == []
+        assert page.request.get(url).status == 503
+        assert manager.snapshot['exports']['hiddify.json'] == baseline
+        page.locator('#customize-subscription').click()
+        expect(page.locator('#policy-tab-count')).to_have_text('0')
+        expect(page.locator('#policy-available-panel')).to_be_visible()
+        page.keyboard.press('Escape')
+        checks.append('batch removal persists only on Save, removes saved configurations from this subscription and leaves provider feeds intact')
     finally:
         manager.fetcher = original_fetcher
         if page.locator('#policy-dialog').is_visible():
@@ -438,7 +455,7 @@ def check_batch_server_policy(page, checks):
         rows.nth(1).locator('[data-batch]').check()
         rows.nth(3).locator('[data-batch]').check()
         expect(panel).to_be_visible()
-        expect(page.locator('#policy-batch-count')).to_have_text('Edit 2 selected servers')
+        expect(page.locator('#policy-batch-count')).to_have_text('2 servers selected')
         expect(page.locator('#policy-batch-apply')).to_be_disabled()
         expect(rows.nth(1).locator('[data-selected]')).to_be_checked()
         expect(rows.nth(3).locator('[data-selected]')).not_to_be_checked()
@@ -449,7 +466,7 @@ def check_batch_server_policy(page, checks):
         page.evaluate('loadState()')
         expect(page.locator('#policy-batch-address')).to_have_value('relay.example.org')
         page.locator('#policy-provider-filter').select_option('provider-0')
-        expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+        expect(page.locator('#policy-batch-count')).to_have_text('3 servers selected')
         page.locator('#policy-batch-port').fill('70000')
         page.locator('#policy-batch-apply').click()
         expect(page.locator('#policy-batch-error')).to_contain_text('between 1 and 65535')
@@ -488,10 +505,11 @@ def check_batch_server_policy(page, checks):
             assert panel.evaluate('el => el.scrollWidth <= el.clientWidth'), width
             assert page.locator('.policy-editor-body').evaluate('el => el.scrollWidth <= el.clientWidth'), width
             rows.nth(4).locator('[data-batch]').check()
-            expect(page.locator('#policy-batch-count')).to_have_text('Edit 4 selected servers')
+            expect(page.locator('#policy-batch-count')).to_have_text('4 servers selected')
             rows.nth(4).locator('[data-batch]').uncheck()
-            expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+            expect(page.locator('#policy-batch-count')).to_have_text('3 servers selected')
             expect(page.locator('#policy-batch-apply')).to_be_in_viewport()
+            expect(page.locator('#policy-batch-remove')).to_be_in_viewport()
             expect(page.locator('#policy-save')).to_be_in_viewport()
             if width in (1440, 390) and os.environ.get('PARSER_TEST_SCREENSHOTS'):
                 page.screenshot(path=os.environ['PARSER_TEST_SCREENSHOTS'] + f'/server-policy-batch-{width}.png')
@@ -499,7 +517,7 @@ def check_batch_server_policy(page, checks):
         fail_save[0] = True
         page.locator('#policy-save').click()
         expect(page.locator('#policy-error')).to_contain_text('Concurrent change')
-        expect(page.locator('#policy-batch-count')).to_have_text('Edit 3 selected servers')
+        expect(page.locator('#policy-batch-count')).to_have_text('3 servers selected')
         expect(rows.nth(1).locator('[data-batch]')).to_be_checked()
         fail_save[0] = False
         page.locator('#policy-save').click()
@@ -547,7 +565,7 @@ def check_batch_server_policy(page, checks):
         page.locator('#customize-subscription').click()
         page.locator('#policy-batch-page').click()
         expect(page.locator('[data-batch]:checked')).to_have_count(25)
-        expect(page.locator('#policy-batch-count')).to_have_text('Edit 25 selected servers')
+        expect(page.locator('#policy-batch-count')).to_have_text('25 servers selected')
         expect(page.locator('#policy-batch-page')).to_be_disabled()
         page.locator('#policy-saved-next').click()
         expect(page.locator('[data-batch]:checked')).to_have_count(0)
@@ -573,6 +591,75 @@ def check_batch_server_policy(page, checks):
         expect(page.locator('[data-batch]:checked')).to_have_count(0)
         expect(rows.first.locator('.policy-endpoint')).to_have_text('custom-0.example.org:5000')
         checks.append('page selection is bounded; clearing, unchecking, removal and Cancel clear temporary batch state without saving')
+
+        # Removing a batch includes checked rows hidden by pages and filters,
+        # while unrelated saved fields must survive the policy replacement.
+        rows.nth(1).locator('[data-batch]').check()
+        rows.nth(3).locator('[data-batch]').check()
+        page.locator('#policy-saved-next').click()
+        rows.nth(1).locator('[data-batch]').check()  # Record 26.
+        page.locator('#policy-provider-filter').select_option('provider-1')
+        expect(page.locator('#policy-batch-remove')).to_have_text('Remove 3 selected')
+        expect(page.locator('#policy-batch-scope')).to_contain_text('Includes 1')
+        expect(page.locator('#policy-batch-remove-hint')).not_to_contain_text('All working servers')
+        page.locator('#policy-batch-port').fill('70000')
+        page.locator('#policy-batch-remove').click()
+        expect(page.locator('#policy-tab-count')).to_have_text('57')
+        expect(panel).not_to_be_visible()
+        expect(page.locator('#policy-saved-search')).to_be_focused()
+        expect(page.locator('#policy-batch-port')).to_have_value('')
+        expect(page.locator('[data-batch]:checked')).to_have_count(0)
+        assert len(writes) == 3
+        fail_save[0] = True
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-error')).to_contain_text('Concurrent change')
+        expect(page.locator('#policy-tab-count')).to_have_text('57')
+        fail_save[0] = False
+        page.locator('#policy-save').click()
+        expect(page.locator('#policy-dialog')).not_to_be_visible()
+        assert writes[-2] == writes[-1]
+        expected = [{key: row[key] for key in ('id', 'provider_id', 'source_identity', 'selected', 'address', 'port', 'name')}
+                    for index, row in enumerate(records) if index not in (1, 3, 26)]
+        assert writes[-1]['records'] == expected and not writes[-1]['all_servers']
+        checks.append('batch removal includes checked rows across pages and filters; failed saves retain removals and unrelated records stay unchanged')
+
+        # Removing every page in all-working mode clamps pagination, clears
+        # stale editor/relink state, and exposes the original sources again.
+        fixture['available'] = [candidate, {key: records[59][key]
+                                           for key in ('provider_id', 'provider_name', 'source_identity', 'source')}]
+        fixture['available_total'] = 2
+        page.locator('#customize-subscription').click()
+        page.locator('#policy-mode').select_option('all')
+        page.locator('#policy-saved-page-select').select_option('2')
+        rows.last.locator('[data-edit]').click()
+        expect(page.locator('[data-remove]')).to_have_text('Remove saved server')
+        page.locator('[data-relink]').click()
+        page.locator('#policy-tab-saved').click()
+        page.locator('#policy-batch-page').click()
+        expect(page.locator('#policy-batch-remove-hint')).to_contain_text('Provider originals can still appear')
+        page.locator('#policy-batch-remove').click()
+        expect(page.locator('#policy-saved-page-select')).to_have_value('1')
+        expect(rows).to_have_count(25)
+        expect(page.locator('.policy-record-editor')).to_have_count(0)
+        page.locator('#policy-tab-available').click()
+        expect(page.locator('#policy-relink-notice')).not_to_be_visible()
+        expect(page.locator('.policy-available-row')).to_have_count(2)
+        page.locator('#policy-tab-saved').click()
+        for remaining in (25, 0):
+            page.locator('#policy-batch-page').click()
+            page.locator('#policy-batch-remove').click()
+            expect(page.locator('#policy-tab-count')).to_have_text(str(remaining))
+        expect(page.locator('#policy-saved-empty')).to_be_visible()
+        expect(page.locator('#policy-saved-page')).to_have_text('0–0 of 0 matches')
+        expect(page.locator('#policy-batch-page')).to_be_disabled()
+        expect(panel).not_to_be_visible()
+        page.locator('#policy-dialog [data-close=policy-dialog]').last.click()
+        assert len(writes) == 5
+        page.locator('#customize-subscription').click()
+        expect(page.locator('#policy-tab-count')).to_have_text('60')
+        expect(page.locator('#policy-mode')).to_have_value('selected')
+        expect(page.locator('[data-batch]:checked')).to_have_count(0)
+        checks.append('batch removal works in all-working mode, repairs paging and relink state, makes sources available again and Cancel restores all saved rows')
     finally:
         if page.locator('#policy-dialog').is_visible():
             page.keyboard.press('Escape')

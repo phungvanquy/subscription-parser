@@ -174,13 +174,19 @@ selector. Search names, addresses, or ports, and filter by provider, selection,
 overrides, or connection status. **Include matches** and **Exclude matches** apply
 to every filtered saved entry across all pages; they retain existing overrides.
 
-To change several endpoints together, tick their **Batch** checkboxes in
-**Saved servers**, or choose **Select page for editing**. A panel appears with
+To work with several servers together, tick their **Batch** checkboxes in
+**Saved servers**, or choose **Select page**. A panel appears with
 **Domain / IP address** and **Port** fields. Enter either or both values and choose
 **Apply to selected**, then **Save server settings**. Blank batch fields keep each
 server's current value; they do not clear existing overrides. Names and other
 connection settings are preserved. Batch selection is separate from inclusion
 in the subscription and works in either inclusion mode.
+
+To remove those saved servers, choose **Remove selected**, then **Save server
+settings**. This removes their saved configurations, inclusion selections, and
+overrides from this subscription. The button shows the number of selected servers,
+including selections on other pages or hidden by filters. Removal stays in the
+draft until you save; **Cancel** discards it.
 
 You can select servers across pages and filters; the panel shows how many selected
 servers are outside the current page. **Clear selection** unchecks the batch
@@ -191,9 +197,12 @@ Choose **Edit** on a saved row to open its address, port, and name fields. Only
 one editor opens at a time, and drafts survive paging, filtering, and tab changes.
 Saved source values appear beside the overrides. Blank fields inherit those values.
 **Reset** clears one override;
-**Forget saved server** removes its saved selection and edits when you save the
-form. Unchecking a selection preserves its overrides. Up to 1000 source servers
-can be saved in each subscription. Bulk actions stay in the draft until you save;
+**Remove saved server** removes its saved configuration, selection, and edits when
+you save the form. Unchecking **Include** preserves its overrides. In **All working
+servers** mode, removing a saved entry can leave the provider's original server in
+the feed. Use **Only selected servers** and uncheck **Include** to exclude a server
+while retaining its saved settings. Up to 1000 source servers can be saved in each
+subscription. Bulk actions stay in the draft until you save;
 Cancel discards them. Save and validation errors remain visible at the bottom.
 
 Saving a server also saves its complete source configuration and required proxy
@@ -202,8 +211,9 @@ even if a provider refresh removes it, changes its source, or draws a different
 random sample. The provider's ordinary random sample and other subscriptions
 remain unchanged. Saved servers are additional entries in their own subscription.
 A failed or expired saved connection is excluded from client feeds but remains
-in the editor and is checked again. Deselecting it, forgetting it, removing its
-provider from the subscription, or pausing/removing the provider excludes it.
+in the editor and is checked again. Removing the saved entry stops publishing
+its saved configuration. Deselecting it in **Only selected servers** mode, removing
+its provider from the subscription, or pausing/removing the provider also excludes it.
 
 Matching uses a fingerprint of the original native configuration within its
 provider, including settings specific to one client. Your own
